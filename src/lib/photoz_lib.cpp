@@ -648,6 +648,39 @@ PhotoZ::PhotoZ(keymap& key_analysed) {
   }
 }
 
+void PhotoZ::export_maglib(int mabs_ref, double *flux_out, double *z,
+                           int *types, double *mag0, int *nummod, double *age,
+                           double *ebv) const {
+  const size_t n_t = fullLib.size();
+  const int n_b = imagm;
+  if (n_t == 0 || n_b <= 0) return;
+  if (mabs_ref < 0) mabs_ref = 0;
+  if (mabs_ref >= n_b) mabs_ref = n_b - 1;
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (size_t i = 0; i < n_t; ++i) {
+    SED *sed = fullLib[i];
+    int typ = 2;
+    if (sed->nlib == GAL)
+      typ = 0;
+    else if (sed->nlib == QSO)
+      typ = 1;
+    types[i] = typ;
+    int i0 = sed->index_z0;
+    if (i0 < 0 || static_cast<size_t>(i0) >= n_t) i0 = static_cast<int>(i);
+    mag0[i] = fullLib[i0]->mag[mabs_ref];
+    nummod[i] = sed->nummod;
+    age[i] = sed->age;
+    ebv[i] = sed->ebv;
+    z[i] = zLib[i];
+    const vector<double> &fi = flux[i];
+    double *row = flux_out + i * static_cast<size_t>(n_b);
+    for (int k = 0; k < n_b; ++k) row[k] = fi[k];
+  }
+}
+
 keymap read_keymap_from_doc(const string libName) {
   // List of the keywords to be found in the mag_gal doc output.
   string list_keywords[] = {

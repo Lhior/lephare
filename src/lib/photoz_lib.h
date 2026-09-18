@@ -292,6 +292,15 @@ class PhotoZ {
    */
   void prep_data(onesource* oneObj);
 
+  //! Dense mag-library arrays for accelerated backends (OpenMP over templates).
+  /*!
+    \param mabs_ref 0-based MAG_REF filter index for mag0
+    \param flux row-major [N_t * N_b]
+    \param z, types, mag0, nummod, age, ebv length N_t
+  */
+  void export_maglib(int mabs_ref, double *flux, double *z, int *types,
+                     double *mag0, int *nummod, double *age, double *ebv) const;
+
   //! Return the indexes over zlib vector on which to run the fit
   /*!
     \param redshift: the selected redshift
