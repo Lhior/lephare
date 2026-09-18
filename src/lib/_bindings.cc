@@ -523,7 +523,35 @@ PYBIND11_MODULE(_lephare, mod) {
            "Indices of the library templates compatible with a redshift.")
       .def(
           "compute_offsets", &PhotoZ::compute_offsets,
-          "Determine the per-band zero-point offsets to apply before fitting.");
+          "Determine the per-band zero-point offsets to apply before fitting.")
+      .def(
+          "export_maglib",
+          [](PhotoZ &self, int mabs_ref) {
+            const size_t n_t = self.fullLib.size();
+            const ssize_t n_b = self.imagm;
+            py::array_t<double> flux({static_cast<ssize_t>(n_t), n_b});
+            py::array_t<double> z(static_cast<ssize_t>(n_t));
+            py::array_t<int> types(static_cast<ssize_t>(n_t));
+            py::array_t<double> mag0(static_cast<ssize_t>(n_t));
+            py::array_t<int> nummod(static_cast<ssize_t>(n_t));
+            py::array_t<double> age(static_cast<ssize_t>(n_t));
+            py::array_t<double> ebv(static_cast<ssize_t>(n_t));
+            self.export_maglib(mabs_ref, flux.mutable_data(), z.mutable_data(),
+                               types.mutable_data(), mag0.mutable_data(),
+                               nummod.mutable_data(), age.mutable_data(),
+                               ebv.mutable_data());
+            py::dict out;
+            out["flux"] = flux;
+            out["z"] = z;
+            out["types"] = types;
+            out["mag0"] = mag0;
+            out["nummod"] = nummod;
+            out["age"] = age;
+            out["ebv"] = ebv;
+            return out;
+          },
+          py::arg("mabs_ref") = 0,
+          "Dense template-library tensors (flux, z, type, mag0, model, age, E(B-V)) for lephare.accel.");
   // mod.def("read_lib", [](const string& libName, int ind, vector<int>
   // emMod, int babs) { 			vector<SED*> libFull; int
   // nummodpre[3]; 			string filtname; vector<double>
