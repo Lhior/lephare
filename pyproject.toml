@@ -44,6 +44,10 @@ zphota = "lephare.zphota:main"
 
 # On a mac, install optional dependencies with `pip install '.[dev]'` (include the single quotes)
 [project.optional-dependencies]
+# Optional accelerated backends in lephare.accel (CUDA 12 wheels; CPU-only JAX: pip install jax)
+jax = ["jax[cuda12]"]
+cuda = ["cupy-cuda12x"]
+accel = ["lephare[jax,cuda]"]
 dev = [
     "jupyter", # Clears output from Jupyter notebooks
     "pre-commit", # Used to run checks before finalizing a git commit
@@ -74,6 +78,9 @@ write_to = "src/lephare/_version.py"
 [tool.pytest.ini_options]
 testpaths = [
     "tests",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 
 [tool.black]
