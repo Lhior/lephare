@@ -35,6 +35,9 @@ class SedSpectrum:
     age: float = 0.0
     luv: float = -999.0
     lopt: float = -999.0
+    lnir: float = -999.0
+    ltir: float = -999.0
+    mass: float = -999.0
     sfr: float = -999.0
     zmet: float = -999.0
 
@@ -162,6 +165,27 @@ def load_filters_from_config(config: dict) -> list[FilterCurve]:
     return out
 
 
+def _gal_phys_count(raw: bytes) -> int:
+    """Number of doubles after each GAL spectrum in ``GalSED::writeSED``.
+
+    LePhare 1.0 writes 11 (``luv lopt lnir ltir mass sfr zmet tau d4000 qi[2]
+    age``); older releases wrote 10 (no ``qi[2]``). Pick the layout that walks
+    the file exactly.
+    """
+    import struct
+
+    for n_phys in (11, 10):
+        offset = 0
+        while offset + 12 <= len(raw):
+            nbw = int(struct.unpack_from("<q", raw, offset + 4)[0])
+            if nbw <= 0:
+                break
+            offset += 12 + 16 * nbw + 8 * n_phys
+        if offset == len(raw):
+            return n_phys
+    raise ValueError("GAL lib_bin layout not recognised (expected 10 or 11 phys doubles)")
+
+
 def iter_sed_bin(path: str | Path, kind: str = "star") -> Iterable[SedSpectrum]:
     """Yield SEDs from a sedtolib ``lib_bin/*.bin`` (STAR/QSO/GAL layouts)."""
     import struct
@@ -170,6 +194,8 @@ def iter_sed_bin(path: str | Path, kind: str = "star") -> Iterable[SedSpectrum]:
     raw = path.read_bytes()
     offset = 0
     n = len(raw)
+    is_gal = kind.lower().startswith("g")
+    n_phys = _gal_phys_count(raw) if is_gal else 0
 
     while offset + 4 + 8 <= n:
         nummod = int(struct.unpack_from("<i", raw, offset)[0])
@@ -182,28 +208,25 @@ def iter_sed_bin(path: str | Path, kind: str = "star") -> Iterable[SedSpectrum]:
         offset += 8 * nbw
         flux = np.frombuffer(raw, dtype="<f8", count=nbw, offset=offset).copy()
         offset += 8 * nbw
-        age = 0.0
-        luv = lopt = sfr = zmet = -999.0
-        if kind.lower().startswith("g"):
-            # GalSED appends 10 doubles after the spectrum.
-            if offset + 80 > n:
-                break
-            phys = np.frombuffer(raw, dtype="<f8", count=10, offset=offset)
-            offset += 80
-            luv = float(phys[0])
-            lopt = float(phys[1])
-            sfr = float(phys[5])
-            zmet = float(phys[6])
-            age = float(phys[9])
+        if not is_gal:
+            yield SedSpectrum(nummod=nummod, lamb=lamb, flux=flux)
+            continue
+        if offset + 8 * n_phys > n:
+            break
+        phys = np.frombuffer(raw, dtype="<f8", count=n_phys, offset=offset)
+        offset += 8 * n_phys
         yield SedSpectrum(
             nummod=nummod,
             lamb=lamb,
             flux=flux,
-            age=age,
-            luv=luv,
-            lopt=lopt,
-            sfr=sfr,
-            zmet=zmet,
+            age=float(phys[-1]),
+            luv=float(phys[0]),
+            lopt=float(phys[1]),
+            lnir=float(phys[2]),
+            ltir=float(phys[3]),
+            mass=float(phys[4]),
+            sfr=float(phys[5]),
+            zmet=float(phys[6]),
         )
 
 
