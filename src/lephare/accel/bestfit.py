@@ -115,8 +115,12 @@ def min_chi2_per_zbin(
     return out[0] if single else out
 
 
-def empty_ancil(n_obj: int) -> dict[str, np.ndarray]:
-    """Allocate default RAIL output_keys arrays."""
+def empty_ancil(n_obj: int, n_bands: int) -> dict[str, np.ndarray]:
+    """Allocate default RAIL output_keys arrays plus the private fit state.
+
+    ``_INDMIN_GAL`` (best GAL template row) and ``_BUSNORMA`` (bands used in the
+    final fit, after RM_DISCREPANT) feed :mod:`.physical`; callers strip ``_*`` keys.
+    """
     return {
         "Z_BEST": np.full(n_obj, INVALID_Z, dtype=np.float64),
         "CHI_BEST": np.full(n_obj, HIGH_CHI2, dtype=np.float64),
@@ -124,6 +128,8 @@ def empty_ancil(n_obj: int) -> dict[str, np.ndarray]:
         "CHI_QSO": np.full(n_obj, HIGH_CHI2, dtype=np.float64),
         "MOD_STAR": np.full(n_obj, float(INVALID_INDEX), dtype=np.float64),
         "CHI_STAR": np.full(n_obj, HIGH_CHI2, dtype=np.float64),
+        "_INDMIN_GAL": np.full(n_obj, float(INVALID_INDEX), dtype=np.float64),
+        "_BUSNORMA": np.zeros((n_obj, n_bands), dtype=np.float64),
     }
 
 
@@ -131,11 +137,13 @@ def bestfit_ancil_from_chi2(
     chi2: np.ndarray,
     tensors: MagLibTensors,
     z_interp: bool | None = None,
+    busnorma: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Build default RAIL ``output_keys`` from final per-object χ².
 
     Follows ``onesource::fit`` winners, optional ``interp`` via MIN_ZG/MIN_ZQ
     ``improve_extremum``, then ``uncertaintiesMin`` (``zgmin[0]`` / ``zqmin[0]``).
+    ``busnorma`` (bands of the final fit) is passed through as ``_BUSNORMA``.
     """
     chi2 = np.asarray(chi2, dtype=np.float64)
     single = chi2.ndim == 1
@@ -182,7 +190,10 @@ def bestfit_ancil_from_chi2(
         "CHI_QSO": chimin[:, 1].copy(),
         "MOD_STAR": mod_star,
         "CHI_STAR": chimin[:, 2].copy(),
+        "_INDMIN_GAL": indmin[:, 0].astype(np.float64),
     }
+    if busnorma is not None:
+        out["_BUSNORMA"] = np.asarray(busnorma, dtype=np.float64).reshape(n_obj, -1)
     if single:
         return {k: np.asarray(v[0]) for k, v in out.items()}
     return out
@@ -195,6 +206,7 @@ def bestfit_ancil_from_type_mins(
     min_zg: np.ndarray | None = None,
     min_zq: np.ndarray | None = None,
     z_interp: bool | None = None,
+    busnorma: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Build RAIL ``output_keys`` from per-type winners (+ optional MIN_ZG/ZQ).
 
@@ -254,7 +266,10 @@ def bestfit_ancil_from_type_mins(
         "CHI_QSO": chimin[:, 1].copy(),
         "MOD_STAR": mod_star,
         "CHI_STAR": chimin[:, 2].copy(),
+        "_INDMIN_GAL": indmin[:, 0].astype(np.float64),
     }
+    if busnorma is not None:
+        out["_BUSNORMA"] = np.asarray(busnorma, dtype=np.float64).reshape(n_obj, -1)
     if single:
         return {k: np.asarray(v[0]) for k, v in out.items()}
     return out

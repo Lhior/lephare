@@ -144,6 +144,54 @@ def _ext_applies(nummod: int, i_law: int, ebv: float, modext: np.ndarray) -> boo
     return nummod >= int(modext[i_law, 0]) and nummod <= int(modext[i_law, 1])
 
 
+_LSOL = 3.826e33
+_PC = 3.086e18
+_PI = 3.14159265359
+# Per-row SED metadata carried into MagLibTensors (fill value for non-GAL rows).
+_SED_META = {"luv": -999.0, "lopt": -999.0, "lnir": -999.0, "ltir": -999.0, "mass": -999.0, "sfr": -999.0}
+
+
+def _dust_ltir(spec: SedSpectrum, flux_ext: np.ndarray, setup: MagGalSetup) -> np.ndarray:
+    """``GalMag::make_maglib`` dust luminosity per redshift (log Lsol).
+
+    ``dL`` is the trapezoid flux lost to extinction on the SED extended by
+    ``warning_integrateSED`` (zero-flux points at λ=0 / 1e8(1+z)); the
+    ``lib_bin`` value is kept unless it is negative and ``dL > 0``.
+    """
+    lamb = np.asarray(spec.lamb, dtype=np.float64)
+    before = np.asarray(spec.flux, dtype=np.float64)
+    after = np.asarray(flux_ext, dtype=np.float64)
+    out = np.full(setup.gridz.size, float(spec.ltir))
+    if spec.ltir >= 0 or lamb.size < 2 or after.shape != before.shape:
+        return out
+    width = lamb[1:] - lamb[:-1]
+    # SED::trapzd before minus after (exactly 0 when E(B-V)=0, as in C++)
+    lost = float(np.sum((before[1:] + before[:-1]) * 0.5 * width)) - float(
+        np.sum((after[1:] + after[:-1]) * 0.5 * width)
+    )
+    one_pz = 1.0 + setup.gridz
+    blue = np.zeros(setup.gridz.size, dtype=bool)
+    red = np.zeros(setup.gridz.size, dtype=bool)
+    for flt in setup.filters:
+        blue |= lamb[0] * one_pz > flt.lmin
+        red |= lamb[-1] * one_pz < flt.lmax
+    lost = (
+        lost
+        + np.where(blue, 0.5 * (before[0] - after[0]) * lamb[0], 0.0)
+        + np.where(red, 0.5 * (before[-1] - after[-1]) * (1.0e8 * one_pz - lamb[-1]), 0.0)
+    )
+    d_l = lost / _LSOL * (4 * _PI * 100 * _PC**2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(d_l > 0, np.log10(d_l), out)
+
+
+def _gal_row_meta(specs: Sequence[SedSpectrum], rows_ltir: Sequence[float]) -> dict[str, np.ndarray]:
+    """Per-row ``lib_bin`` physical columns (luv/lopt/lnir/mass/sfr) plus MagGal ltir."""
+    out = {k: np.asarray([getattr(s, k) for s in specs], dtype=np.float64) for k in _SED_META if k != "ltir"}
+    out["ltir"] = np.asarray(rows_ltir, dtype=np.float64)
+    return out
+
+
 def _stack_opa(opa_all: list[OpaTable]) -> tuple[np.ndarray, np.ndarray]:
     nmax = max(int(t.lamb.size) for t in opa_all)
     ntab = len(opa_all)
@@ -478,10 +526,11 @@ def maggal_one_gal(
             if not _ext_applies(spec.nummod, i, float(ebv), setup.modext):
                 continue
             lamb_e, flux_e = apply_extinction_cpp(spec.lamb, spec.flux, float(ebv), setup.ext_laws[i])
+            ltir_z = _dust_ltir(spec, flux_e, setup)
             for frac in setup.frac_em:
                 rest_l.append(lamb_e)
                 rest_f.append(flux_e)
-                meta.append((float(ebv), float(frac), int(setup.ext_laws[i].numext)))
+                meta.append((float(ebv), float(frac), int(setup.ext_laws[i].numext), ltir_z))
     if not rest_l:
         empty = np.zeros((0, n_b), dtype=np.float64)
         return {
@@ -494,6 +543,7 @@ def maggal_one_gal(
             "mag0": np.zeros(0),
             "frac_em": np.zeros(0),
             "extlaw": np.zeros(0, dtype=np.int32),
+            **{k: np.zeros(0) for k in _SED_META},
         }
     age_ok = np.broadcast_to(setup.grid_t > spec.age, (len(rest_l), n_z)).copy()
     if integrator == "jax":
@@ -523,10 +573,11 @@ def maggal_one_gal(
         [],
         [],
     )
+    rows_ltir = []
     mag0_of: list[float] = []
     leftover_m0 = HIGH_MAG
     mabs = min(setup.mabs_ref, n_b - 1)
-    for c, (ebv, frac, extid) in enumerate(meta):
+    for c, (ebv, frac, extid, ltir_z) in enumerate(meta):
         mag_z0 = None
         for k, z in enumerate(setup.gridz):
             if not age_ok[c, k]:
@@ -541,13 +592,14 @@ def maggal_one_gal(
             rows_num.append(int(spec.nummod))
             rows_ext.append(extid)
             rows_frac.append(frac)
+            rows_ltir.append(float(ltir_z[k]))
         mag0_of.append(mag_z0[mabs] if mag_z0 is not None else leftover_m0)
         if mag_z0 is not None:
             leftover_m0 = mag_z0[mabs]
     mag = np.vstack(rows_mag) if rows_mag else np.zeros((0, n_b))
     mag0 = []
     ic = 0
-    for c, (ebv, frac, extid) in enumerate(meta):
+    for c in range(len(meta)):
         nkeep = int(np.sum(age_ok[c]))
         mag0.extend([mag0_of[c]] * nkeep)
         ic += nkeep
@@ -563,6 +615,7 @@ def maggal_one_gal(
         "mag0": mag0,
         "frac_em": np.asarray(rows_frac, dtype=np.float64),
         "extlaw": np.asarray(rows_ext, dtype=np.int32),
+        **_gal_row_meta([spec] * len(rows_z), rows_ltir),
     }
 
 
@@ -580,6 +633,7 @@ def _concat_maggal_blocks(chunks: list[dict[str, np.ndarray]]) -> dict[str, np.n
             "mag0": np.zeros(0),
             "frac_em": np.zeros(0),
             "extlaw": np.zeros(0, dtype=np.int32),
+            **{k: np.zeros(0) for k in _SED_META},
         }
     keys = chunks[0].keys()
     out = {}
@@ -612,10 +666,13 @@ def maggal_gal_library(
                 lamb_e, flux_e = apply_extinction_cpp(
                     spec.lamb, spec.flux, float(ebv), setup.ext_laws[i]
                 )
+                ltir_z = _dust_ltir(spec, flux_e, setup)
                 for frac in setup.frac_em:
                     rest_l.append(lamb_e)
                     rest_f.append(flux_e)
-                    recs.append((spec, float(ebv), float(frac), int(setup.ext_laws[i].numext)))
+                    recs.append(
+                        (spec, float(ebv), float(frac), int(setup.ext_laws[i].numext), ltir_z)
+                    )
     if not rest_l:
         return maggal_one_gal(spectra[0], setup, integrator="jax", em_lines=em_lines)
     pad_l, pad_f = _pad_spectra(rest_l, rest_f)
@@ -634,10 +691,11 @@ def maggal_gal_library(
         [],
         [],
     )
+    rows_spec, rows_ltir = [], []
     mag0_of = {}
     leftover_m0 = HIGH_MAG
     mabs = min(setup.mabs_ref, n_b - 1)
-    for c, (spec, ebv, frac, extid) in enumerate(recs):
+    for c, (spec, ebv, frac, extid, ltir_z) in enumerate(recs):
         mag_z0 = None
         for k, z in enumerate(setup.gridz):
             if not age_ok[c, k]:
@@ -652,6 +710,8 @@ def maggal_gal_library(
             rows_num.append(int(spec.nummod))
             rows_ext.append(extid)
             rows_frac.append(frac)
+            rows_spec.append(spec)
+            rows_ltir.append(float(ltir_z[k]))
         mag0_of[c] = mag_z0[mabs] if mag_z0 is not None else leftover_m0
         if mag_z0 is not None:
             leftover_m0 = mag_z0[mabs]
@@ -670,6 +730,7 @@ def maggal_gal_library(
         "mag0": np.asarray(mag0, dtype=np.float64),
         "frac_em": np.asarray(rows_frac, dtype=np.float64),
         "extlaw": np.asarray(rows_ext, dtype=np.int32),
+        **_gal_row_meta(rows_spec, rows_ltir),
     }
 
 
@@ -946,9 +1007,16 @@ def build_maglib_jax_from_lib_bin(
         else:
             kind_order.append("gal")
 
+    blocks_meta: dict[str, list[np.ndarray]] = {k: [] for k in ("mag", "extlaw", *_SED_META)}
+
     def _append(block: dict[str, np.ndarray], typ: int) -> None:
         if block["flux"].shape[0] == 0:
             return
+        n_rows = block["flux"].shape[0]
+        blocks_meta["mag"].append(block["mag"])
+        blocks_meta["extlaw"].append(block.get("extlaw", np.zeros(n_rows, dtype=np.int64)))
+        for k, fill in _SED_META.items():
+            blocks_meta[k].append(block.get(k, np.full(n_rows, fill)))
         blocks_flux.append(block["flux"])
         blocks_z.append(block["z"])
         blocks_t.append(np.full(block["z"].shape[0], typ, dtype=np.int32))
@@ -973,6 +1041,7 @@ def build_maglib_jax_from_lib_bin(
             _append(
                 {
                     "flux": flux,
+                    "mag": mag,
                     "z": np.zeros(n, dtype=np.float64),
                     "mag0": mag[:, mabs],
                     "nummod": np.asarray([s.nummod for s in spectra], dtype=np.int32),
@@ -1022,6 +1091,13 @@ def build_maglib_jax_from_lib_bin(
     if np.unique(z).size <= 1:
         raise RuntimeError("JAX MagGal has no redshift diversity")
     meta = _sidecar(config, n_b, setup.gridz)
+    mag = np.vstack(blocks_meta["mag"]).astype(np.float64)
+    # PhotoZ::read_lib: index of the latest z=0 row, kcorr = mag - mag(z=0) - DM(z)
+    rows = np.arange(z.size)
+    index_z0 = np.maximum.accumulate(np.where(z == 0, rows, 0))
+    dist_mod = np.interp(z, setup.gridz, setup.grid_dm)
+    kcorr = mag - mag[index_z0] - np.where(z < 1e-10, 0.0, dist_mod)[:, None]
+    phys = {k: np.concatenate(blocks_meta[k]).astype(np.float64) for k in _SED_META}
     return MagLibTensors(
         flux=np.asarray(flux, dtype=np.float64),
         z=np.asarray(z, dtype=np.float64),
@@ -1041,4 +1117,9 @@ def build_maglib_jax_from_lib_bin(
         age=np.asarray(age, dtype=np.float64),
         ebv=np.asarray(ebv, dtype=np.float64),
         z_interp=meta["z_interp"],
+        extlaw=np.concatenate(blocks_meta["extlaw"]).astype(np.int64),
+        index_z0=index_z0,
+        mag=mag,
+        kcorr=kcorr,
+        **phys,
     )

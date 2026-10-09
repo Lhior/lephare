@@ -96,6 +96,13 @@ def _device_bay_zg(cp, tensors: MagLibTensors) -> tuple[BayZgIndex, dict]:
     key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, id(tensors.types))
     if key not in _INDEX_CACHE:
         index = prepare_bay_zg_index(tensors)
+        qso_idx = np.flatnonzero(np.asarray(tensors.types) == 1)
+        qso_bins = _z_bins(np.asarray(tensors.z)[qso_idx], index.gridz)
+        # global template columns per z bin (MIN_ZG / MIN_ZQ on the object path)
+        zbin_cols = {
+            "gal": [cp.asarray(index.gal_idx[c]) for c in index.bin_cols],
+            "qso": [cp.asarray(qso_idx[qso_bins == b]) for b in range(index.n_z)],
+        }
         _INDEX_CACHE[key] = (
             index,
             {
@@ -107,9 +114,41 @@ def _device_bay_zg(cp, tensors: MagLibTensors) -> tuple[BayZgIndex, dict]:
                 "mag0": cp.asarray(tensors.mag0, dtype=np.float64),
                 "z_lib": cp.asarray(tensors.z, dtype=np.float64),
                 "prior": cp.asarray(tensors.prior_lib, dtype=np.float64),
+                "zbin_cols": zbin_cols,
             },
         )
     return _INDEX_CACHE[key]
+
+
+def _z_bins(z: np.ndarray, gridz: np.ndarray) -> np.ndarray:
+    """Nearest ``gridz`` bin (same rule as ``prepare_bay_zg_index``)."""
+    if gridz.size <= 1:
+        return np.zeros(z.size, dtype=np.int64)
+    inv = 1.0 / (gridz[1] - gridz[0])
+    return np.clip(np.rint((z - gridz[0]) * inv).astype(np.int64), 0, gridz.size - 1)
+
+
+def _fit_winners_device(cp, d_chi2, index: BayZgIndex, d_aux: dict):
+    """Per-type ``(indmin, chimin)`` and MIN_ZG / MIN_ZQ curves from device χ² (host out)."""
+    n_obj = d_chi2.shape[0]
+    rows = cp.arange(n_obj)
+    indmin = cp.full((n_obj, 3), -99, dtype=cp.int64)
+    chimin = cp.full((n_obj, 3), HIGH_CHI2, dtype=cp.float64)
+    for t in range(3):
+        vals = cp.where(d_aux["types"][None, :] == t, d_chi2, HIGH_CHI2)
+        idx = cp.argmin(vals, axis=1)
+        cmin = vals[rows, idx].astype(cp.float64)
+        ok = cmin < HIGH_CHI2
+        indmin[:, t] = cp.where(ok, idx, -99)
+        chimin[:, t] = cp.where(ok, cmin, HIGH_CHI2)
+    mins = []
+    for kind in ("gal", "qso"):
+        out = cp.full((n_obj, index.n_z), HIGH_CHI2, dtype=cp.float64)
+        for b, cols in enumerate(d_aux["zbin_cols"][kind]):
+            if cols.size:
+                out[:, b] = d_chi2[:, cols].min(axis=1)
+        mins.append(cp.asnumpy(out))
+    return cp.asnumpy(indmin), cp.asnumpy(chimin), mins[0], mins[1]
 
 
 def _apply_mabs_priors(
@@ -483,12 +522,12 @@ def process_batch_cuda(
             tile_t=size,
         )
 
-    pdfs, zgrid, zmode, zmean = _process_batch_cuda_core(
+    pdfs, zgrid, zmode, zmean, ancil = _process_batch_cuda_core(
         mags, magerrs, tensors, context=context, offsets=offsets, dtype=dtype
     )
     if not return_ancil:
         return pdfs, zgrid
-    return pdfs, zgrid, zmode, zmean
+    return pdfs, zgrid, zmode, zmean, ancil
 
 
 def _process_batch_cuda_core(
@@ -498,8 +537,15 @@ def _process_batch_cuda_core(
     context: np.ndarray | None = None,
     offsets: np.ndarray | None = None,
     dtype=np.float64,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Object-batched CUDA χ²+PDF; selective host RM_DISCREPANT for C++ parity."""
+    from .bestfit import (
+        bestfit_ancil_from_chi2,
+        bestfit_ancil_from_type_mins,
+        empty_ancil,
+        merge_ancil,
+    )
+
     cp = _require_cupy()
     ab, sab, busnorma, busul, nbul = prepare_photometry_cuda(
         mags, magerrs, tensors, context=context, offsets=offsets, dtype=dtype
@@ -511,6 +557,7 @@ def _process_batch_cuda_core(
     pdfs = np.zeros((n_obj, n_z), dtype=np.float64)
     zmode = np.full(n_obj, np.nan, dtype=np.float64)
     zmean = np.full(n_obj, np.nan, dtype=np.float64)
+    ancil = empty_ancil(n_obj, n_b)
     chunk = suggest_chi2_chunk_size(tensors.flux.shape[0], dtype=dtype)
     d_flux = _device_flux(cp, tensors.flux, dtype)
     index, d_aux = _device_bay_zg(cp, tensors)
@@ -522,9 +569,10 @@ def _process_batch_cuda_core(
         batch_idx = [i for i in range(start, end) if int(nbul[i]) == 0]
 
         for i in ul_idx:
-            chi2, _, _, _ = rm_discrepant(
+            chi2, _, _, bus = rm_discrepant(
                 ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
             )
+            merge_ancil(ancil, bestfit_ancil_from_chi2(chi2, tensors, busnorma=bus), np.asarray([i]))
             pdfs[i] = bay_zg_pdf(chi2, tensors)
             zm, zmn = pdf_zmode_zmean(pdfs[i : i + 1], tensors.gridz)
             zmode[i] = zm[0]
@@ -576,6 +624,21 @@ def _process_batch_cuda_core(
             pdfs[easy_i_np] = cp.asnumpy(d_pdf)
             zmode[easy_i_np] = cp.asnumpy(d_zm)
             zmean[easy_i_np] = cp.asnumpy(d_zmn)
+            indmin, chimin, min_zg, min_zq = _fit_winners_device(
+                cp, d_chi2[easy_j_np], index, d_aux
+            )
+            merge_ancil(
+                ancil,
+                bestfit_ancil_from_type_mins(
+                    indmin,
+                    chimin,
+                    tensors,
+                    min_zg=min_zg,
+                    min_zq=min_zq,
+                    busnorma=busnorma[easy_i_np],
+                ),
+                easy_i_np,
+            )
 
         if hard:
             hard_j = np.asarray([j for j, _ in hard], dtype=np.int64)
@@ -620,12 +683,15 @@ def _process_batch_cuda_core(
                         nb_removed += 1
                     else:
                         break
+                merge_ancil(
+                    ancil, bestfit_ancil_from_chi2(chi2, tensors, busnorma=bus), np.asarray([i])
+                )
                 pdfs[i] = bay_zg_pdf(chi2, tensors)
                 zm, zmn = pdf_zmode_zmean(pdfs[i : i + 1], tensors.gridz)
                 zmode[i] = zm[0]
                 zmean[i] = zmn[0]
 
-    return pdfs, tensors.gridz.astype(np.float64, copy=False), zmode, zmean
+    return pdfs, tensors.gridz.astype(np.float64, copy=False), zmode, zmean, ancil
 
 
 def cuda_available() -> bool:

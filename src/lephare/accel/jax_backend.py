@@ -658,16 +658,18 @@ def _finish_hard_rows(
     ul_rows = np.flatnonzero(nbul > 0)
     hard_rows = np.flatnonzero(nbul == 0)
     chi2_by_local: dict[int, np.ndarray] = {}
+    bus_by_local: dict[int, np.ndarray] = {}
 
     for row in ul_rows:
         i = int(idxs[row])
-        c2, _, _, _ = rm_discrepant(
+        c2, _, _, bus = rm_discrepant(
             ab[row], sab[row], busnorma[row], busul[row], int(nbul[row]), tensors
         )
         pdfs[i] = np.asarray(
             jax.device_get(pdf_fn(jnp.asarray(c2[None, :], dtype=dtype)))
         )[0]
         chi2_by_local[int(row)] = np.asarray(c2, dtype=np.float64)
+        bus_by_local[int(row)] = bus
 
     if hard_rows.size:
         hard_chunk = 512
@@ -730,13 +732,15 @@ def _finish_hard_rows(
                 i = int(idxs[row])
                 pdfs[i] = pdf_hard[t]
                 chi2_by_local[int(row)] = np.asarray(c2_stack[t], dtype=np.float64)
+                bus_by_local[int(row)] = buses[t]
 
     ordered = np.asarray(sorted(chi2_by_local.keys()), dtype=np.int64)
     if ordered.size:
         c2_stack = np.stack([chi2_by_local[int(r)] for r in ordered], axis=0)
+        bus_stack = np.stack([bus_by_local[int(r)] for r in ordered], axis=0)
         merge_ancil(
             ancil,
-            bestfit_ancil_from_chi2(c2_stack, tensors),
+            bestfit_ancil_from_chi2(c2_stack, tensors, busnorma=bus_stack),
             idxs[ordered],
         )
 
@@ -794,6 +798,7 @@ def _process_template_tiles(
         has_o,
     )
     nbul_np = np.asarray(jax.device_get(nbul))
+    busnorma_np = np.asarray(jax.device_get(busnorma), dtype=np.float64)
 
     chimin = jnp.full((n_obj, 3), HIGH_CHI2, dtype=jd)
     indmin = jnp.full((n_obj, 3), -99, dtype=jnp.int64)
@@ -855,7 +860,7 @@ def _process_template_tiles(
         easy_mask = np.ones(n_obj, dtype=bool)
     hard_acc = [(int(i), int(nbul_np[i])) for i in np.flatnonzero(~easy_mask)]
 
-    ancil = empty_ancil(n_obj)
+    ancil = empty_ancil(n_obj, n_b)
     # Easy ancil from pass-1 winners (no second full χ²)
     easy_idxs = np.flatnonzero(easy_mask)
     if easy_idxs.size:
@@ -867,6 +872,7 @@ def _process_template_tiles(
                 tensors,
                 min_zg=min_zg_np[easy_idxs],
                 min_zq=min_zq_np[easy_idxs],
+                busnorma=busnorma_np[easy_idxs],
             ),
             easy_idxs,
         )
@@ -917,7 +923,7 @@ def _process_object_tiles(
     n_z = len(tensors.gridz)
     pdfs = np.zeros((n_obj, n_z), dtype=np.float64)
     easy_mask = np.ones(n_obj, dtype=bool)
-    ancil = empty_ancil(n_obj)
+    ancil = empty_ancil(n_obj, n_b)
 
     has_c = context is not None
     has_o = offsets is not None
@@ -967,7 +973,7 @@ def _process_object_tiles(
                 jnp.asarray(busnorma, dtype=dtype),
             )
             c2 = np.asarray(jax.device_get(c2), dtype=np.float64)
-            merge_ancil(ancil, bestfit_ancil_from_chi2(c2, tensors), idxs)
+            merge_ancil(ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=busnorma), idxs)
 
     def _launch(start, end):
         return estimate_tile(
@@ -1060,7 +1066,7 @@ def _process_cpu_object_chunks(
     pdfs = np.zeros((n_obj, n_z), dtype=np.float64)
     zmode = np.zeros(n_obj, dtype=np.float64)
     zmean = np.zeros(n_obj, dtype=np.float64)
-    ancil = empty_ancil(n_obj) if return_ancil else None
+    ancil = empty_ancil(n_obj, int(mags.shape[1])) if return_ancil else None
     zgrid = None
     for start in range(0, n_obj, obj_chunk):
         end = min(start + obj_chunk, n_obj)

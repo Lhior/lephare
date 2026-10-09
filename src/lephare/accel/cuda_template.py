@@ -1018,7 +1018,8 @@ def process_template_tiles_cuda(
         easy_mask = np.ones(n_obj, dtype=bool)
     hard_idxs = np.flatnonzero(~easy_mask)
 
-    ancil = empty_ancil(n_obj)
+    ancil = empty_ancil(n_obj, n_b)
+    busnorma = np.asarray(cp.asnumpy(d_bus), dtype=np.float64)
     easy_idxs = np.flatnonzero(easy_mask)
     if easy_idxs.size:
         merge_ancil(
@@ -1029,6 +1030,7 @@ def process_template_tiles_cuda(
                 tensors,
                 min_zg=min_zg_np[easy_idxs],
                 min_zq=min_zq_np[easy_idxs],
+                busnorma=busnorma[easy_idxs],
             ),
             easy_idxs,
         )
@@ -1038,14 +1040,13 @@ def process_template_tiles_cuda(
 
         ab = cp.asnumpy(d_ab)
         sab = cp.asnumpy(d_sab)
-        busnorma = cp.asnumpy(d_bus)
         busul = cp.asnumpy(d_busul)
         d_flux = _device_flux(cp, tensors.flux, dtype)
         types = tensors.types
         for i in hard_idxs:
             i = int(i)
             if int(nbul[i]) > 0:
-                c2, _, _, _ = rm_discrepant(
+                c2, _, _, bus = rm_discrepant(
                     ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
                 )
             else:
@@ -1099,7 +1100,9 @@ def process_template_tiles_cuda(
                     else:
                         break
             pdfs[i] = bay_zg_pdf(c2, tensors)
-            merge_ancil(ancil, bestfit_ancil_from_chi2(c2, tensors), np.asarray([i]))
+            merge_ancil(
+                ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=bus), np.asarray([i])
+            )
 
     zgrid = lib["gridz"]
     zmode, zmean = pdf_zmode_zmean(pdfs, zgrid)

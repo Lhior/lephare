@@ -31,6 +31,21 @@ class MagLibTensors:
     age: np.ndarray | None = None  # [N_t] SED age (interp_lib is_same_model)
     ebv: np.ndarray | None = None  # [N_t] SED E(B-V)
     z_interp: bool = True  # match C++ Z_INTERP for Z_BEST / ZQ_BEST
+    # Per-template SED metadata for galaxy physical properties (None if unknown).
+    extlaw: np.ndarray | None = None  # [N_t] extinction law index (SED::extlawId)
+    luv: np.ndarray | None = None  # [N_t] log NUV luminosity (SED::luv)
+    lopt: np.ndarray | None = None  # [N_t] log optical luminosity (SED::lopt)
+    lnir: np.ndarray | None = None  # [N_t] log NIR luminosity (SED::lnir)
+    ltir: np.ndarray | None = None  # [N_t] log dust luminosity [Lsol] (SED::ltir)
+    mass: np.ndarray | None = None  # [N_t] stellar mass [Msol] (SED::mass, -999 if undefined)
+    sfr: np.ndarray | None = None  # [N_t] SFR [Msol/yr] (SED::sfr, -999 if undefined)
+    index_z0: np.ndarray | None = None  # [N_t] row of the z=0 version of the template
+    mag: np.ndarray | None = None  # [N_t, N_b] model AB mags incl. emission lines
+    kcorr: np.ndarray | None = None  # [N_t, N_b] k-corrections mag(z) - mag(0) - DM(z)
+
+    def has_phys(self) -> bool:
+        """True when all per-template metadata for galaxy properties is present."""
+        return all(getattr(self, f) is not None for f in PHYS_FIELDS)
 
     def astype(self, dtype) -> "MagLibTensors":
         return MagLibTensors(
@@ -52,7 +67,28 @@ class MagLibTensors:
             age=None if self.age is None else self.age.astype(dtype, copy=False),
             ebv=None if self.ebv is None else self.ebv.astype(dtype, copy=False),
             z_interp=bool(self.z_interp),
+            **{f: _copy_or_none(getattr(self, f)) for f in PHYS_FIELDS},
         )
+
+
+# Optional per-template metadata (float arrays keep float64; index arrays stay int).
+PHYS_FIELDS = (
+    "extlaw",
+    "luv",
+    "lopt",
+    "lnir",
+    "ltir",
+    "mass",
+    "sfr",
+    "index_z0",
+    "mag",
+    "kcorr",
+)
+_PHYS_INT_FIELDS = ("extlaw", "index_z0")
+
+
+def _copy_or_none(arr):
+    return None if arr is None else np.array(arr, copy=True)
 
 
 def _parse_doubles(cfg: dict[str, Any], key: str, default: str, n: int = -1) -> list[float]:
@@ -101,11 +137,17 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
         raise RuntimeError(
             f"PhotoZ flux rows {n_t} != fullLib size {len(full)}"
         )
+    n_bands = int(photz.imagm)
     types = np.empty(n_t, dtype=np.int32)
     mag0 = np.empty(n_t, dtype=np.float64)
     nummod = np.empty(n_t, dtype=np.int32)
     age = np.empty(n_t, dtype=np.float64)
     ebv = np.empty(n_t, dtype=np.float64)
+    extlaw = np.empty(n_t, dtype=np.int64)
+    lum = np.empty((n_t, 4), dtype=np.float64)  # luv, lopt, lnir, ltir
+    index_z0 = np.empty(n_t, dtype=np.int64)
+    mag = np.empty((n_t, n_bands), dtype=np.float64)
+    red = np.empty(n_t, dtype=np.float64)
     for i, sed in enumerate(full):
         if sed.is_gal():
             types[i] = 0
@@ -116,11 +158,16 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
         i0 = int(sed.index_z0)
         if i0 < 0 or i0 >= n_t:
             i0 = i
-        mag_z0 = full[i0].mag
+        index_z0[i] = i0
+        mag[i] = sed.mag
+        mag_z0 = mag[i0] if i0 <= i else full[i0].mag
         mag0[i] = float(mag_z0[mabs_ref] if mabs_ref < len(mag_z0) else mag_z0[0])
         nummod[i] = int(sed.nummod)
         age[i] = float(getattr(sed, "age", 0.0) or 0.0)
         ebv[i] = float(getattr(sed, "ebv", 0.0) or 0.0)
+        extlaw[i] = int(sed.extlawId)
+        lum[i] = (sed.luv, sed.lopt, sed.lnir, sed.ltir)
+        red[i] = float(sed.red)
     if int(np.sum(types == 0)) <= 0:
         raise RuntimeError("maglib export produced no GAL templates")
     if np.unique(z).size <= 1:
@@ -131,8 +178,10 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
         cosmo_vals = [70.0, 0.3, 0.7]
     lcdm = lp.cosmo(cosmo_vals[0], cosmo_vals[1], cosmo_vals[2])
     funz0 = float(lcdm.distMod(gridz[1] / 20.0)) if len(gridz) > 1 else 0.0
+    # PhotoZ::read_lib -> GalSED::kcorrec: mag(z) - mag(z=0) - distMod(z)
+    kcorr = mag - mag[index_z0] - np.asarray(lcdm.distMod(red), dtype=np.float64)[:, None]
+    mass, sfr = _gal_mass_sfr_from_lib_bin(config, types, nummod, age)
 
-    n_bands = int(photz.imagm)
     err_scale = np.asarray(
         _parse_doubles(config, "ERR_SCALE", "0.02", n_bands), dtype=np.float64
     )
@@ -169,7 +218,55 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
         age=age,
         ebv=ebv,
         z_interp=z_interp,
+        extlaw=extlaw,
+        luv=lum[:, 0].copy(),
+        lopt=lum[:, 1].copy(),
+        lnir=lum[:, 2].copy(),
+        ltir=lum[:, 3].copy(),
+        mass=mass,
+        sfr=sfr,
+        index_z0=index_z0,
+        mag=mag,
+        kcorr=kcorr,
     )
+
+
+def _gal_mass_sfr_from_lib_bin(
+    config: dict[str, Any], types: np.ndarray, nummod: np.ndarray, age: np.ndarray
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """GAL stellar mass / SFR per template, joined from sedtolib ``lib_bin`` on (nummod, age).
+
+    The ``lephare`` bindings do not expose ``SED::mass`` / ``SED::sfr``; MagGal copies
+    both unchanged from the rest-frame SED, so the ``lib_bin`` record is authoritative.
+    Returns ``(None, None)`` if the library file is not available.
+    """
+    import os
+    import warnings
+
+    from .mag_conv import iter_sed_bin
+
+    names = str(config.get("GAL_LIB_IN", config.get("GAL_LIB", ""))).split(",")
+    path = Path(os.environ.get("LEPHAREWORK", "")) / "lib_bin" / f"{names[0].strip()}.bin"
+    n_t = types.size
+    if not names[0].strip() or not path.is_file():
+        return None, None
+    table = {(s.nummod, s.age): (s.mass, s.sfr) for s in iter_sed_bin(path, kind="gal")}
+    mass = np.full(n_t, -999.0)
+    sfr = np.full(n_t, -999.0)
+    missing = 0
+    for i in np.flatnonzero(types == 0):
+        hit = table.get((int(nummod[i]), float(age[i])))
+        if hit is None:
+            missing += 1
+            continue
+        mass[i], sfr[i] = hit
+    if missing:
+        warnings.warn(
+            f"{missing} GAL templates have no (nummod, age) match in {path}; "
+            "their MASS/SFR are left undefined (-999).",
+            stacklevel=2,
+        )
+    return mass, sfr
 
 
 def save_maglib(tensors: MagLibTensors, path: str | Path) -> None:
@@ -215,6 +312,11 @@ def save_maglib(tensors: MagLibTensors, path: str | Path) -> None:
             ],
             dtype=np.float64,
         ),
+        **{
+            f: np.asarray(getattr(tensors, f))
+            for f in PHYS_FIELDS
+            if getattr(tensors, f) is not None
+        },
     )
 
 
@@ -226,6 +328,11 @@ def load_maglib(path: str | Path) -> MagLibTensors:
     age = data["age"].astype(np.float64) if "age" in data.files else np.zeros(n_t)
     ebv = data["ebv"].astype(np.float64) if "ebv" in data.files else np.zeros(n_t)
     z_interp = True if meta.size < 6 else bool(meta[5] > 0.5)
+    phys = {}
+    for f in PHYS_FIELDS:
+        if f in data.files:
+            dt = np.int64 if f in _PHYS_INT_FIELDS else np.float64
+            phys[f] = data[f].astype(dt)
     return MagLibTensors(
         flux=data["flux"],
         z=data["z"],
@@ -245,4 +352,5 @@ def load_maglib(path: str | Path) -> MagLibTensors:
         age=age,
         ebv=ebv,
         z_interp=z_interp,
+        **phys,
     )
