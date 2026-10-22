@@ -508,7 +508,9 @@ def process_batch_cuda(
     n_obj = int(np.asarray(mags).shape[0])
     n_t = int(tensors.flux.shape[0])
     axis, size = choose_tiling_axis(n_obj, n_t, dtype=dtype)
-    if axis == "template":
+    # FP32 always takes the fused path: only it applies the FP32 amplitude scale
+    # (BC03 fluxes ~1e-40 underflow otherwise) and it never materializes chi2[N, Nt].
+    if axis == "template" or np.dtype(dtype) == np.float32:
         from .cuda_template import process_template_tiles_cuda
 
         return process_template_tiles_cuda(

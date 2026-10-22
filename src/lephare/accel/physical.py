@@ -419,8 +419,8 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
         flux_bt, valid, dmn, dmx, lgmass, lgsfr, ltir, mref0, *statics = lib
         f = jax.lax.dynamic_slice_in_dim(flux_bt, s, tile, axis=1)
         sl = lambda a: jax.lax.dynamic_slice_in_dim(a, s, tile)  # noqa: E731
-        avmago = abinv @ f
-        avmagt = inv2 @ (f * f)
+        avmago = jnp.matmul(abinv, f, precision=jax.lax.Precision.HIGHEST)  # no TF32
+        avmagt = jnp.matmul(inv2, f * f, precision=jax.lax.Precision.HIGHEST)
         pos = avmagt > 0
         safe = jnp.where(pos, avmagt, 1.0)
         dm = jnp.where(pos, avmago / safe, -999.0)

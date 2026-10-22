@@ -8,6 +8,7 @@ CUDA fused path in ``cuda_template``.
 
 from __future__ import annotations
 
+import functools
 import os
 
 import numpy as np
@@ -197,6 +198,9 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
     dm_min_gal = dm_min[gal_idx] if gal_idx.size else dm_min[:0]
     dm_max_gal = dm_max[gal_idx] if gal_idx.size else dm_max[:0]
     dchi_cap = jnp.asarray(FP32_DCHI_MAX if dtype == np.float32 else 700.0, dtype=jd)
+    # Full-precision GEMMs: the default lets float32 run as TF32 on Ampere+, and
+    # chi2 = base - avmago**2 / avmagt cancels badly at that precision.
+    mm = functools.partial(jnp.matmul, precision=jax.lax.Precision.HIGHEST)
 
     def _apply_priors(chi2, dm, types_t, dm_min_t, dm_max_t):
         if not priors_on:
@@ -214,7 +218,7 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         invsabSq = invsab * invsab
         s2n = ab * invsab
         abinvsabSq = ab * invsabSq
-        avmago = flux @ abinvsabSq
+        avmago = mm(flux, abinvsabSq)
         avmagt = jnp.sum(flux * flux * invsabSq, axis=-1)
         dm = jnp.where(avmagt > 0, avmago / avmagt, -999.0)
         inter = s2n[None, :] - dm[:, None] * flux * invsab[None, :]
@@ -228,8 +232,8 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         invsabSq = invsab * invsab
         abinvsabSq = ab * invsabSq
         s2n = ab * invsab
-        avmago = abinvsabSq @ flux_bt
-        avmagt = invsabSq @ flux_sq_bt
+        avmago = mm(abinvsabSq, flux_bt)
+        avmagt = mm(invsabSq, flux_sq_bt)
         dm = jnp.where(avmagt > 0, avmago / avmagt, -999.0)
         base = jnp.sum(s2n * s2n, axis=-1)
         chi2 = jnp.where(
@@ -245,8 +249,8 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         invsabSq = invsab * invsab
         abinvsabSq = ab * invsabSq
         s2n = ab * invsab
-        avmago = abinvsabSq @ flux_t
-        avmagt = invsabSq @ flux_sq_t
+        avmago = mm(abinvsabSq, flux_t)
+        avmagt = mm(invsabSq, flux_sq_t)
         dm = jnp.where(avmagt > 0, avmago / avmagt, -999.0)
         base = jnp.sum(s2n * s2n, axis=-1)
         chi2 = jnp.where(
@@ -460,6 +464,7 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         "n_z": n_z,
         "jd": jd,
         "threshold": threshold,
+        "amp_scale": amp_scale,
         "jax": jax,
         "jnp": jnp,
     }
@@ -967,9 +972,12 @@ def _process_object_tiles(
                 tensors,
                 offsets=offsets if has_o else None,
             )
+            # Same FP32 amplitude scale as the library (chi2 is invariant to it);
+            # unscaled AB fluxes overflow 1/sab**2 in float32.
+            scale = fns["amp_scale"]
             c2, _ = fit_batch(
-                jnp.asarray(ab, dtype=dtype),
-                jnp.asarray(sab, dtype=dtype),
+                jnp.asarray(ab * scale, dtype=dtype),
+                jnp.asarray(sab * scale, dtype=dtype),
                 jnp.asarray(busnorma, dtype=dtype),
             )
             c2 = np.asarray(jax.device_get(c2), dtype=np.float64)
