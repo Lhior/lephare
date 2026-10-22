@@ -143,10 +143,23 @@ def apply_extinction(
 
 
 def load_filters_from_config(config: dict) -> list[FilterCurve]:
+    """Filters as C++ ``Mag`` sees them.
+
+    ``Mag::Mag`` (``mag.cpp``) reads ``$LEPHAREWORK/filt/<FILTER_FILE>.dat``, which the filter
+    step writes with 6 significant digits; ``FilterSvc.from_keymap`` keeps full precision and
+    shifts every band integral by up to ~1e-6 relative.  Prefer the written file when present.
+    """
+    import os
+
     import lephare as lp
 
     keymap = lp.all_types_to_keymap(config)
-    flts = list(lp.FilterSvc.from_keymap(keymap))
+    name = str(keymap["FILTER_FILE"].value).split(",")[0].strip() if "FILTER_FILE" in keymap else "filters"
+    dat = Path(os.environ.get("LEPHAREWORK", "")) / "filt" / f"{name or 'filters'}.dat"
+    if dat.is_file():
+        flts = list(lp.read_filters_from_file(str(dat)))
+    else:
+        flts = list(lp.FilterSvc.from_keymap(keymap))
     out: list[FilterCurve] = []
     for f in flts:
         lamb = np.array([e.lamb for e in f.lamb_trans], dtype=np.float64)

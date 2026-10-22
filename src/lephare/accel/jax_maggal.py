@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -648,9 +649,13 @@ def maggal_gal_library(
     *,
     integrator: str = "jax",
     em_lines: bool | None = None,
+    xp=np,
 ) -> dict[str, np.ndarray]:
-    """All GAL rest-frame SEDs in one GPU ``(N_combo, N_z)`` launch when ``integrator='jax'``."""
+    """All GAL rest-frame SEDs in one GPU ``(N_combo, N_z)`` launch when ``integrator='jax'``;
+    ``integrator='linear'`` integrates them as one GEMM per wavelength grid on ``xp``."""
     use_em = setup.emlines[:1] in ("E", "P", "e", "p") if em_lines is None else em_lines
+    if integrator == "linear":
+        return _maggal_gal_linear(spectra, setup, use_em, xp)
     if integrator != "jax":
         return _concat_maggal_blocks(
             [maggal_one_gal(s, setup, integrator=integrator, em_lines=em_lines) for s in spectra]
@@ -739,7 +744,10 @@ def maggal_qso_library(
     setup: MagGalSetup,
     *,
     integrator: str = "jax",
+    xp=np,
 ) -> dict[str, np.ndarray]:
+    if integrator == "linear":
+        return _maggal_qso_linear(spectra, setup, xp)
     if integrator != "jax":
         return _concat_maggal_blocks(
             [maggal_one_qso(s, setup, integrator=integrator) for s in spectra]
@@ -788,6 +796,105 @@ def maggal_qso_library(
         "age": np.zeros(mag.shape[0], dtype=np.float64),
         "nummod": np.asarray(rows_num, dtype=np.int32),
         "mag0": mag0,
+    }
+
+
+def _ext_variants(spectra, setup):
+    """(spec, ebv, extid, lamb_e, flux_e) for every applicable extinction variant (C++ order)."""
+    for spec in spectra:
+        for i in range(len(setup.ext_laws)):
+            for ebv in setup.ebv:
+                if not _ext_applies(spec.nummod, i, float(ebv), setup.modext):
+                    continue
+                lamb_e, flux_e = apply_extinction_cpp(spec.lamb, spec.flux, float(ebv), setup.ext_laws[i])
+                yield spec, float(ebv), int(setup.ext_laws[i].numext), lamb_e, flux_e
+
+
+def _em_rest_lines(spec: SedSpectrum, ebv: float, frac: float, setup: MagGalSetup):
+    """Rest-frame line list ``(lamb, val)`` before ``generateEmSpectra``."""
+    if setup.emlines.startswith("EMP_SFR"):
+        ll, lv = generate_em_emp_sfr(spec.sfr, spec.luv, spec.lopt)
+    else:
+        ll, lv = generate_em_emp_uv(spec.luv, spec.lopt)
+    ll, lv = apply_ext_lines(ll, lv, ebv, setup.mw_ext)
+    return ll, rescale_em_lines(lv, frac)
+
+
+def _maggal_gal_linear(spectra, setup: MagGalSetup, use_em: bool, xp) -> dict[str, np.ndarray]:
+    """``maggal_gal_library`` with the continuum and lines integrated as GEMMs
+    (``maggal_linear``); same rows, order and metadata as the per-SED C++ port."""
+    from .maggal_linear import continuum_mags_linear, em_line_fluxes_linear
+
+    n_b = len(setup.filters)
+    recs, rest_l, rest_f = [], [], []
+    for spec, ebv, extid, lamb_e, flux_e in _ext_variants(spectra, setup):
+        ltir_z = _dust_ltir(spec, flux_e, setup)
+        for frac in setup.frac_em:
+            recs.append((spec, ebv, float(frac), extid, ltir_z))
+            rest_l.append(lamb_e)
+            rest_f.append(flux_e)
+    if not recs:
+        return maggal_one_gal(spectra[0], setup, integrator="cpp", em_lines=use_em)
+    ages = np.asarray([r[0].age for r in recs], dtype=np.float64)
+    age_ok = np.asarray(setup.grid_t)[None, :] > ages[:, None]
+    mags_cz = continuum_mags_linear(rest_l, rest_f, age_ok, setup, xp=xp)
+    if use_em:
+        fnu = em_line_fluxes_linear([_em_rest_lines(r[0], r[1], r[2], setup) for r in recs], setup, xp=xp)
+        mags_cz = mag_plus_lines(mags_cz.reshape(-1, n_b), fnu.reshape(-1, n_b)).reshape(mags_cz.shape)
+        mags_cz[~age_ok] = HIGH_MAG
+    c_idx, k_idx = np.nonzero(age_ok)
+    mag = mags_cz[c_idx, k_idx]
+    gridz = np.asarray(setup.gridz, dtype=np.float64)
+    mabs = min(setup.mabs_ref, n_b - 1)
+    mag0_of = np.empty(len(recs))
+    leftover = HIGH_MAG
+    z0 = gridz < 1e-5
+    for c in range(len(recs)):
+        hit = np.flatnonzero(age_ok[c] & z0)
+        if hit.size:
+            leftover = mags_cz[c, hit[0], mabs]
+        mag0_of[c] = leftover
+    per = lambda f: np.asarray([f(r) for r in recs])  # noqa: E731
+    ltir = np.stack([r[4] for r in recs])
+    meta = {k: per(lambda r, k=k: getattr(r[0], k)).astype(np.float64)[c_idx] for k in _SED_META if k != "ltir"}
+    return {
+        "mag": mag,
+        "flux": device_ab_mag_to_flux(mag),
+        "z": gridz[k_idx],
+        "ebv": per(lambda r: r[1]).astype(np.float64)[c_idx],
+        "age": ages[c_idx],
+        "nummod": per(lambda r: r[0].nummod).astype(np.int32)[c_idx],
+        "mag0": mag0_of[c_idx],
+        "frac_em": per(lambda r: r[2]).astype(np.float64)[c_idx],
+        "extlaw": per(lambda r: r[3]).astype(np.int32)[c_idx],
+        **meta,
+        "ltir": ltir[c_idx, k_idx],
+    }
+
+
+def _maggal_qso_linear(spectra, setup: MagGalSetup, xp) -> dict[str, np.ndarray]:
+    """``maggal_qso_library`` (no age cut, no lines) via ``continuum_mags_linear``."""
+    from .maggal_linear import continuum_mags_linear
+
+    recs = list(_ext_variants(spectra, setup))
+    if not recs:
+        return maggal_one_qso(spectra[0], setup, integrator="cpp")
+    n_z, n_b = int(setup.gridz.size), len(setup.filters)
+    age_ok = np.ones((len(recs), n_z), dtype=bool)
+    mags_cz = continuum_mags_linear([r[3] for r in recs], [r[4] for r in recs], age_ok, setup, xp=xp)
+    gridz = np.asarray(setup.gridz, dtype=np.float64)
+    mabs = min(setup.mabs_ref, n_b - 1)
+    z0 = np.flatnonzero(gridz < 1e-5)
+    k0 = z0[0] if z0.size else n_z - 1  # no z=0 row: C++ port falls back to the last row
+    mag = mags_cz.reshape(-1, n_b)
+    return {
+        "mag": mag,
+        "flux": device_ab_mag_to_flux(mag),
+        "z": np.tile(gridz, len(recs)),
+        "ebv": np.repeat([r[1] for r in recs], n_z).astype(np.float64),
+        "age": np.zeros(mag.shape[0], dtype=np.float64),
+        "nummod": np.repeat([r[0].nummod for r in recs], n_z).astype(np.int32),
+        "mag0": np.repeat(mags_cz[:, k0, mabs], n_z),
     }
 
 
@@ -967,12 +1074,25 @@ def build_maglib_jax_from_lib_bin(
     config: dict[str, Any],
     *,
     integrator: str = "jax",
+    device: str = "numpy",
     star_config=None,
     gal_config=None,
     qso_config=None,
 ) -> MagLibTensors:
-    """Build ``MagLibTensors`` from ``lib_bin`` on the JAX MagGal path."""
+    """Build ``MagLibTensors`` from ``lib_bin`` (C++ filter + sedtolib, then MagGal here).
+
+    ``integrator='linear'`` integrates each wavelength grid as one GEMM on ``device``
+    (a backend name: ``cuda_*`` -> CuPy, ``jax_*`` -> jax.numpy, else NumPy);
+    ``'jax'`` is the per-(SED, z) union-grid JAX kernel; ``'cpp'`` the per-SED port.
+    """
     from lephare.prepare import _DEFAULT
+
+    from .point_estimates import device_array_module
+
+    xp = device_array_module(device)[0] if integrator == "linear" else np
+
+    def xp_ctx():  # fresh each time: jax's enable_x64 context is single-use
+        return device_array_module(device)[1] if integrator == "linear" else _nullcontext()
 
     if star_config is None:
         star_config = _DEFAULT
@@ -1032,9 +1152,14 @@ def build_maglib_jax_from_lib_bin(
             spectra = list(iter_sed_bin(_lib_bin_path(name), kind="star"))
             if not spectra:
                 continue
-            flux = device_compute_fluxes_batch(
-                spectra, setup.filters, backend="jax" if integrator == "jax" else "numpy"
-            )
+            if integrator == "linear":
+                from .maggal_linear import star_mags_linear
+
+                flux = device_ab_mag_to_flux(star_mags_linear(spectra, setup, xp=xp))
+            else:
+                flux = device_compute_fluxes_batch(
+                    spectra, setup.filters, backend="jax" if integrator == "jax" else "numpy"
+                )
             n = flux.shape[0]
             mag = -2.5 * np.log10(np.clip(flux, 1e-300, None)) - 48.6
             mabs = min(setup.mabs_ref, n_b - 1)
@@ -1051,7 +1176,7 @@ def build_maglib_jax_from_lib_bin(
                 2,
             )
             print(
-                f"[jax MagGal] STAR n_sed={n} {time.perf_counter() - t_kind:.2f}s",
+                f"[MagGal {integrator}] STAR n_sed={n} {time.perf_counter() - t_kind:.2f}s",
                 flush=True,
             )
             if integrator == "jax":
@@ -1060,9 +1185,10 @@ def build_maglib_jax_from_lib_bin(
         elif kind == "gal":
             name = _split_list(config, "GAL_LIB_IN", _split_list(config, "GAL_LIB", "GAL_BIN")[0])[0]
             gal_specs = list(iter_sed_bin(_lib_bin_path(name), kind="gal"))
-            _append(maggal_gal_library(gal_specs, setup, integrator=integrator), 0)
+            with xp_ctx():
+                _append(maggal_gal_library(gal_specs, setup, integrator=integrator, xp=xp), 0)
             print(
-                f"[jax MagGal] GAL n_sed={len(gal_specs)} "
+                f"[MagGal {integrator}] GAL n_sed={len(gal_specs)} "
                 f"{time.perf_counter() - t_kind:.2f}s",
                 flush=True,
             )
@@ -1072,9 +1198,10 @@ def build_maglib_jax_from_lib_bin(
         else:
             name = _split_list(qso_cfg, "QSO_LIB_IN", _split_list(qso_cfg, "QSO_LIB", "QSO_BIN")[0])[0]
             qso_specs = list(iter_sed_bin(_lib_bin_path(name), kind="qso"))
-            _append(maggal_qso_library(qso_specs, qsetup, integrator=integrator), 1)
+            with xp_ctx():
+                _append(maggal_qso_library(qso_specs, qsetup, integrator=integrator, xp=xp), 1)
             print(
-                f"[jax MagGal] QSO n_sed={len(qso_specs)} "
+                f"[MagGal {integrator}] QSO n_sed={len(qso_specs)} "
                 f"{time.perf_counter() - t_kind:.2f}s",
                 flush=True,
             )

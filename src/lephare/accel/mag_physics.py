@@ -34,24 +34,14 @@ LB_LINE = np.array(
     ],
     dtype=np.float64,
 )
-Z0_LINE_EMP_UV = np.array(
-    [
-        22.2, 0, 0, 0, 0, 0, 0, 0.81, 0.81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 0.21, 0.59, 0, 0, 0, 0, 0, 0, 2.90, 0.0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0,
-    ],
-    dtype=np.float64,
-)
-Z0_LINE_EMP_SFR = np.array(
-    [
-        22.2, 0, 0, 0, 0, 0, 0, 1.425, 1.425, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1.36, 4.081, 0, 0, 0, 0, 0, 0, 2.85, 0.86, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0,
-    ],
-    dtype=np.float64,
-)
+# ``empirical_ratio`` in ``lephare/src/lib/emission_lines.h`` (v1.0.0): H-beta-normalized
+# ratios used by BOTH ``GalSED::generateEmEmpUV`` and ``generateEmEmpSFR``
+# (Lya 22.2, [OII] 1.425+1.425, [OIII] 0.38+1.14, H-alpha 2.85, [NII]6583 0.86).
+# The older Ilbert+09 ``empirical_ratio_ori`` (0.81/0.21/0.59/2.90) is not used by MagGal.
+EMPIRICAL_RATIO = np.zeros(65, dtype=np.float64)
+EMPIRICAL_RATIO[[0, 7, 8, 20, 21, 22, 29, 30]] = [22.2, 1.425, 1.425, 1.0, 0.38, 1.14, 2.85, 0.86]
+Z0_LINE_EMP_UV = EMPIRICAL_RATIO
+Z0_LINE_EMP_SFR = EMPIRICAL_RATIO
 
 
 @dataclass
@@ -71,51 +61,21 @@ class OpaTable:
     lmax: float
 
 
-def _sort_ori(lamb: np.ndarray, val: np.ndarray, ori: np.ndarray):
-    order = np.argsort(lamb, kind="mergesort")
-    return lamb[order].copy(), val[order].copy(), ori[order].copy()
-
-
-def resample(
-    lamb: np.ndarray,
-    val: np.ndarray,
-    ori: np.ndarray,
-    origine: int,
-    lmin: float = 0.0,
-    lmax: float = 1.0e20,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``SED::resample``: interpolate origin ``origine`` onto the merged grid."""
-    mask = (lamb >= lmin) & (lamb <= lmax)
-    lamb = lamb[mask].copy()
-    val = val[mask].copy()
-    ori = ori[mask].copy()
-    n = int(lamb.size)
-    prev_l = -999.0
-    prev_v = -999.0
-    for i in range(n):
-        if ori[i] == origine:
-            prev_l = lamb[i]
-            prev_v = val[i]
-            continue
-        if prev_l > 0:
-            next_l = -999.0
-            next_v = -999.0
-            for k in range(i, n):
-                if ori[k] == origine:
-                    next_l = lamb[k]
-                    next_v = val[k]
-                    break
-            if prev_l > 0 and next_l > prev_l:
-                slope = (next_v - prev_v) / (next_l - prev_l)
-                val[i] = prev_v + (lamb[i] - prev_l) * slope
-                ori[i] = origine
-            else:
-                val[i] = prev_v
-                ori[i] = -99
-        else:
-            val[i] = -99.0
-            ori[i] = -99
-    return lamb, val, ori
+def fast_interpolate(x, y, z, d: float) -> np.ndarray:
+    """``fast_interpolate`` (lephare ``globals.cpp``): linear interpolation of ``(x, y)``
+    at sorted ``z``, ``d`` outside ``[x[0], x[-1]]``."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    out = np.full(z.size, float(d))
+    if x.size < 2 or z.size == 0:
+        return out
+    inside = (z >= x[0]) & (z <= x[-1])
+    # C++ walks i while x[i+1] < z: the segment is the first one with x[i+1] >= z
+    i = np.clip(np.searchsorted(x, z, side="left") - 1, 0, x.size - 2)
+    t = (z - x[i]) / (x[i + 1] - x[i])
+    out[inside] = (y[i] + t * (y[i + 1] - y[i]))[inside]
+    return out
 
 
 def apply_extinction_cpp(
@@ -124,34 +84,14 @@ def apply_extinction_cpp(
     ebv: float,
     law: ExtLaw,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``SED::applyExt`` (ori=1 SED, ori=2 extinction)."""
-    if ebv <= 1e-20:
-        return np.asarray(sed_lamb, dtype=np.float64), np.asarray(sed_flux, dtype=np.float64)
+    """``SED::apply_extinction`` (v1.0.0): ``flux *= 10^(-0.4 ebv k(lambda))`` with
+    ``k = fast_interpolate(law, lambda, 0)``."""
     sl = np.asarray(sed_lamb, dtype=np.float64)
     sv = np.asarray(sed_flux, dtype=np.float64)
-    so = np.ones(sl.size, dtype=np.int32)
-    el = np.asarray(law.lamb, dtype=np.float64)
-    ev = np.asarray(law.kval, dtype=np.float64)
-    eo = np.full(el.size, 2, dtype=np.int32)
-    lamb = np.concatenate([sl, el])
-    val = np.concatenate([sv, ev])
-    ori = np.concatenate([so, eo])
-    lamb, val, ori = _sort_ori(lamb, val, ori)
-    _, new_ext, ext_ori = resample(lamb, val, ori, origine=2, lmin=0.0, lmax=1e20)
-    keep_l = []
-    keep_v = []
-    for k in range(lamb.size):
-        if ori[k] != 1:
-            continue
-        lam = lamb[k]
-        v = val[k]
-        if law.lmin < lam < law.lmax:
-            kval = 0.0 if ext_ori[k] < 0 else new_ext[k]
-            v = val[k] * (10.0 ** (-0.4 * ebv * kval))
-        keep_l.append(lam)
-        keep_v.append(v)
-    return np.asarray(keep_l, dtype=np.float64), np.asarray(keep_v, dtype=np.float64)
-
+    if abs(ebv) <= 1e-20 or sl.size == 0:
+        return sl, sv
+    k = fast_interpolate(law.lamb, law.kval, sl, 0.0)
+    return sl.copy(), sv * np.power(10.0, -0.4 * ebv * k)
 
 def opa_index(z: float) -> int:
     """``lround(red / 0.100000000000001)`` clamped to 80."""
@@ -163,44 +103,27 @@ def opa_index(z: float) -> int:
     return ind
 
 
+def opa_transmission(lamb: np.ndarray, opa: OpaTable) -> np.ndarray:
+    """IGM multiplier of ``SED::applyOpa`` (v1.0.0) at rest-frame ``lamb``:
+    ``fast_interpolate(opa, lamb, 1)`` below 1215.67, 1 elsewhere."""
+    lam = np.asarray(lamb, dtype=np.float64)
+    out = np.ones(lam.size, dtype=np.float64)
+    below = lam < LYA_SPLIT
+    if below.any():
+        out[below] = fast_interpolate(opa.lamb, opa.trans, lam[below], 1.0)
+    return out
+
 def apply_opa_cpp(
     sed_lamb: np.ndarray,
     sed_flux: np.ndarray,
     z: float,
     opa_all: list[OpaTable],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``SED::applyOpa``."""
+    """``SED::applyOpa`` (lephare v1.0.0): multiply fluxes below Lyman-alpha by the
+    interpolated transmission of the opacity table for ``z``; wavelengths unchanged."""
     sl = np.asarray(sed_lamb, dtype=np.float64)
     sv = np.asarray(sed_flux, dtype=np.float64)
-    ind = opa_index(z)
-    opa = opa_all[ind]
-    below = sl < LYA_SPLIT
-    lamb_b, flux_b = sl[below], sv[below]
-    lamb_e, flux_e = sl[~below], sv[~below]
-    ol = np.asarray(opa.lamb, dtype=np.float64)
-    ov = np.asarray(opa.trans, dtype=np.float64)
-    oo = np.full(ol.size, 3, dtype=np.int32)
-    so = np.ones(lamb_b.size, dtype=np.int32)
-    lamb = np.concatenate([lamb_b, ol])
-    val = np.concatenate([flux_b, ov])
-    ori = np.concatenate([so, oo])
-    lamb, val, ori = _sort_ori(lamb, val, ori)
-    _, new_opa, opa_ori = resample(lamb, val, ori, origine=3, lmin=0.0, lmax=1e20)
-    keep_l = []
-    keep_v = []
-    for k in range(lamb.size):
-        if ori[k] != 1:
-            continue
-        lam = lamb[k]
-        v = val[k]
-        if opa.lmin < lam < opa.lmax:
-            t = 1.0 if opa_ori[k] < 0 else new_opa[k]
-            v = val[k] * t
-        keep_l.append(lam)
-        keep_v.append(v)
-    out_l = np.concatenate([np.asarray(keep_l, dtype=np.float64), lamb_e])
-    out_v = np.concatenate([np.asarray(keep_v, dtype=np.float64), flux_e])
-    return out_l, out_v
+    return sl.copy(), sv * opa_transmission(sl, opa_all[opa_index(z)])
 
 
 def warning_integrate_sed(
@@ -234,73 +157,47 @@ def trapzd(sed_lamb: np.ndarray, sed_flux: np.ndarray) -> float:
     return float(np.sum(0.5 * (sed_flux[1:] + sed_flux[:-1]) * (sed_lamb[1:] - sed_lamb[:-1])))
 
 
+def _interp_linear_point(x: np.ndarray, y: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """``interp_linear_point`` (``oneElLambda.cpp``) at each ``q``: 0 outside ``x``."""
+    out = np.zeros(q.size)
+    inside = (q >= x[0]) & (q <= x[-1])
+    idx = np.clip(np.searchsorted(x, q, side="left"), 1, x.size - 1)
+    t = (q - x[idx - 1]) / (x[idx] - x[idx - 1])
+    val = y[idx - 1] + t * (y[idx] - y[idx - 1])
+    val = np.where(q == x[0], y[0], np.where(q == x[-1], y[-1], val))
+    out[inside] = val[inside]
+    return out
+
+
 def integrate_sed_cpp(
     sed_lamb: np.ndarray,
     sed_flux: np.ndarray,
     flt: FilterCurve,
 ) -> tuple[float, float] | None:
-    """Return ``(fmel, arean)`` matching ``SED::integrateSED`` indices 3 and 1."""
+    """``(r3, r1)`` of ``SED::integrateSED`` (lephare v1.0.0); None if not integrable."""
     sl = np.asarray(sed_lamb, dtype=np.float64)
     sv = np.asarray(sed_flux, dtype=np.float64)
-    if sl.size < 2 or sl[0] >= flt.lmin or sl[-1] <= flt.lmax:
-        return None
-    lamb_all = [0.0]
-    val_all = [0.0]
-    ori_all = [1]
-    first_before = True
-    for i in range(sl.size):
-        lam, v = sl[i], sv[i]
-        if lam < flt.lmin:
-            if first_before:
-                lamb_all[0] = lam
-                val_all[0] = v
-            else:
-                lamb_all[0] = lam
-                val_all[0] = v
-            continue
-        if flt.lmin <= lam <= flt.lmax:
-            lamb_all.append(lam)
-            val_all.append(v)
-            ori_all.append(1)
-            continue
-        if lam > flt.lmax:
-            lamb_all.append(lam)
-            val_all.append(v)
-            ori_all.append(1)
-            break
     fl = np.asarray(flt.lamb, dtype=np.float64)
     ft = np.asarray(flt.trans, dtype=np.float64)
-    lamb = np.concatenate([np.asarray(lamb_all, dtype=np.float64), fl])
-    val = np.concatenate([np.asarray(val_all, dtype=np.float64), ft])
-    ori = np.concatenate(
-        [np.asarray(ori_all, dtype=np.int32), np.zeros(fl.size, dtype=np.int32)]
-    )
-    lamb, val, ori = _sort_ori(lamb, val, ori)
-    if ori[0] == 0:
-        lamb = np.concatenate([[lamb[0] - 1.0], lamb])
-        val = np.concatenate([[0.0], val])
-        ori = np.concatenate([[1], ori])
-    if ori[-1] == 0:
-        lamb = np.concatenate([lamb, [lamb[-1] + 1.0]])
-        val = np.concatenate([val, [0.0]])
-        ori = np.concatenate([ori, [1]])
-    tl, tv, to = resample(lamb, val.copy(), ori.copy(), origine=0, lmin=0.0, lmax=1e50)
-    sl2, sv2, so2 = resample(lamb, val.copy(), ori.copy(), origine=1, lmin=0.0, lmax=1e50)
-    fmel = 0.0
-    arean = 0.0
-    for k in range(sl2.size - 1):
-        vs0 = 0.0 if so2[k] < 0 else sv2[k]
-        vs1 = 0.0 if so2[k + 1] < 0 else sv2[k + 1]
-        vt0 = 0.0 if to[k] < 0 else tv[k]
-        vt1 = 0.0 if to[k + 1] < 0 else tv[k + 1]
-        lmean = 0.5 * (sl2[k] + sl2[k + 1])
-        tmean = 0.5 * (vt0 + vt1)
-        fmean = 0.5 * (vs0 + vs1)
-        dlbd = sl2[k + 1] - sl2[k]
-        conv = C_LIGHT_A_S / (lmean * lmean)
-        arean += tmean * conv * dlbd
-        fmel += fmean * tmean * dlbd
-    return fmel, arean
+    if sl.size < 2 or sl[0] > fl[0] or sl[-1] < fl[-1]:
+        return None
+    lo, hi = max(sl[0], fl[0]), min(sl[-1], fl[-1])
+    if lo >= hi:
+        return 0.0, 0.0
+    # restricted_resampling: sorted unique union inside [lo, hi], both curves interpolated
+    x = np.unique(np.concatenate([sl[(sl >= lo) & (sl <= hi)], fl[(fl >= lo) & (fl <= hi)]]))
+    fs = _interp_linear_point(sl, sv, x)
+    tr = _interp_linear_point(fl, ft, x)
+    r3 = r5 = 0.0
+    for i in range(x.size - 1):
+        lmean = (x[i] + x[i + 1]) / 2
+        tmean = (tr[i] + tr[i + 1]) / 2
+        fmean = (fs[i] + fs[i + 1]) / 2
+        tmp = tmean * (x[i + 1] - x[i])
+        r3 += tmp * fmean
+        r5 += tmp / lmean**2
+    return r3, r5 * C_LIGHT_A_S
+
 
 
 def compute_magnitudes_cpp(
@@ -309,17 +206,15 @@ def compute_magnitudes_cpp(
     filters: list[FilterCurve],
     dist_mod: float = 0.0,
 ) -> np.ndarray:
+    """``SED::compute_magnitudes``."""
     mags = np.empty(len(filters), dtype=np.float64)
     for i, flt in enumerate(filters):
         integ = integrate_sed_cpp(sed_lamb, sed_flux, flt)
         if integ is None:
             mags[i] = INVALID_MAG
             continue
-        fmel, arean = integ
-        if fmel > 0.0 and arean > 0.0:
-            mags[i] = -2.5 * np.log10(fmel / arean * flt.fcorr) - 48.6 + dist_mod
-        else:
-            mags[i] = HIGH_MAG
+        r3, r1 = integ
+        mags[i] = -2.5 * np.log10(r3 / r1 * flt.fcorr) - 48.6 + dist_mod if r3 > 0.0 else HIGH_MAG
     return mags
 
 
@@ -384,39 +279,18 @@ def apply_ext_lines(
     ebv: float,
     law: ExtLaw,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``SED::applyExtLines`` with ebvFac=1 and Hayes Lya escape."""
-    if ebv <= 1e-20:
-        return np.asarray(line_lamb, dtype=np.float64), np.asarray(line_val, dtype=np.float64)
+    """``SED::apply_extinction_to_lines`` (v1.0.0, ebvFac = 1, no z dependence) with the
+    Hayes+11 Lyman-alpha escape fraction."""
     sl = np.asarray(line_lamb, dtype=np.float64)
     sv = np.asarray(line_val, dtype=np.float64)
-    so = np.full(sl.size, 5, dtype=np.int32)
-    el = np.asarray(law.lamb, dtype=np.float64)
-    ev = np.asarray(law.kval, dtype=np.float64)
-    eo = np.full(el.size, 2, dtype=np.int32)
-    lamb = np.concatenate([sl, el])
-    val = np.concatenate([sv, ev])
-    ori = np.concatenate([so, eo])
-    lamb, val, ori = _sort_ori(lamb, val, ori)
-    _, new_ext, ext_ori = resample(lamb, val, ori, origine=2, lmin=0.0, lmax=1e20)
-    keep_l = []
-    keep_v = []
-    line_i = 0
-    c_lya, k_lya = 0.445, 13.8
-    for k in range(lamb.size):
-        if ori[k] != 5:
-            continue
-        lam = lamb[k]
-        v = val[k]
-        if law.lmin < lam < law.lmax:
-            kval = 0.0 if ext_ori[k] < 0 else new_ext[k]
-            v = val[k] * (10.0 ** (-0.4 * ebv * kval))
-            if 1215.0 < lam < 1216.0:
-                v = v * (c_lya * (10.0 ** (-0.4 * ebv * k_lya)))
-        line_i += 1
-        keep_l.append(lam)
-        keep_v.append(v)
-    return np.asarray(keep_l, dtype=np.float64), np.asarray(keep_v, dtype=np.float64)
-
+    if ebv <= 1e-20 or sl.size == 0:
+        return sl, sv
+    k = fast_interpolate(law.lamb, law.kval, sl, 0.0)
+    f = 1.0
+    out = sv * np.power(10.0, -0.4 * ebv / f * k)
+    lya = (sl > 1215.0) & (sl < 1216.0)
+    out = np.where(lya, out * (0.445 * np.power(10.0, -0.4 * ebv / f * 13.8)), out)
+    return sl.copy(), out
 
 def rescale_em_lines(line_val: np.ndarray, frac_em: float) -> np.ndarray:
     return np.asarray(line_val, dtype=np.float64) * float(frac_em)

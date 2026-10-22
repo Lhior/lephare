@@ -19,7 +19,6 @@ host.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -396,6 +395,9 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
     base = jnp.sum((ab * inv) ** 2, axis=1)
 
     gal_on, dm_min, dm_max = _gal_priors(tensors, table.gal_idx, dtype)
+    # FP32 runs keep the per-template math and the histogram in float32 (FP64 is 1:64 on
+    # consumer GPUs); FP64 runs are unchanged
+    acc = jnp.float64 if np.dtype(dtype) == np.float64 else jnp.float32
     n_gal = int(table.gal_idx.size)
     tile = 2048
     n_pad = max(tile, -(-n_gal // tile) * tile)
@@ -410,7 +412,7 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
         _p(np.ones(n_gal, dtype=bool), False),
         _p(dm_min, 0),
         _p(dm_max, 0),
-        *(_p(a, np.nan) for a in (table.lgmass, table.lgsfr, table.ltir, table.mref0)),
+        *(_p(a, np.nan).astype(acc) for a in (table.lgmass, table.lgsfr, table.ltir, table.mref0)),
         *(_p(b, 0) for b in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)),
     )
     cap = _dchi_cap(dtype)
@@ -429,10 +431,10 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
         if gal_on:
             reject = (dm > 0) & ((dm <= sl(dmn)[None, :]) | (dm >= sl(dmx)[None, :]))
             chi2 = jnp.where(reject, HIGH_CHI2, chi2)
-        dchi = jnp.maximum(chi2 - cmin[:, None], 0.0).astype(jnp.float64)
+        dchi = jnp.maximum(chi2 - cmin[:, None], 0.0).astype(acc)
         ok = (chi2 < HIGH_CHI2) & (dchi <= cap) & sl(valid)[None, :]
         prob = jnp.where(ok, jnp.exp(-0.5 * dchi), 0.0)
-        lgdm = jnp.log10(dm.astype(jnp.float64))
+        lgdm = jnp.log10(dm.astype(acc))
         lm = sl(lgmass)[None, :]
         mass_ok = ok & (lgdm > -100) & (lm > -100)
         lt = sl(ltir)[None, :]
@@ -469,7 +471,7 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
             return jnp.concatenate([a[sel], jnp.full((npad,) + a.shape[1:], fill, dtype=a.dtype)])
 
         args = (_rows(inv2, 0), _rows(abinv, 0), _rows(base, 0), _rows(cmin_all, HIGH_CHI2))
-        hist = jnp.zeros((chunk, N_HIST), dtype=jnp.float64)
+        hist = jnp.zeros((chunk, N_HIST), dtype=acc)
         for s in range(0, n_pad, tile):
             hist = tile_fn(lib, *args, hist, s)
         out[o0:o1] = np.asarray(jax.device_get(hist))[: o1 - o0]
@@ -479,10 +481,12 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
 _CUDA_KERNELS: dict = {}
 
 
-def _phys_cuda_src(real: str, acc: str = "double") -> str:
+def _phys_cuda_src(real: str, acc: str = "double", ncopy: int = 1) -> str:
     """``generatePDF`` histogram kernel. ``real`` is the per-template math type (chi2,
     weights, bin indices); ``acc`` is the shared-memory histogram accumulator type.
-    FP64 uses double/double; FP32 runs its math in float (1:64 FP64 on consumer GPUs)."""
+    FP64 uses double/double; FP32 runs its math in float (1:64 FP64 on consumer GPUs).
+    ``ncopy`` private shared histograms (one per warp group) cut atomic contention:
+    a posterior lands in a few hot bins, and shared atomics on them serialize."""
 
     def lit(v) -> str:
         return f"{float(v)!r}f" if real == "float" else f"{float(v)!r}"
@@ -531,8 +535,9 @@ void phys_hist_kernel(
     int o = (int)blockIdx.x;
     if (o >= N_obj) return;
     extern __shared__ unsigned char s_raw[];
-    {acc}* s_hist = ({acc}*)s_raw;
-    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) s_hist[b] = 0;
+    {acc}* s_all = ({acc}*)s_raw;
+    for (int b = (int)threadIdx.x; b < {ncopy} * {N_HIST}; b += (int)blockDim.x) s_all[b] = 0;
+    {acc}* s_hist = s_all + (((int)threadIdx.x / 32) % {ncopy}) * {N_HIST};
     {real} r_inv2[16];
     {real} r_abinv[16];
     for (int k = 0; k < 16; ++k) {{
@@ -581,8 +586,11 @@ void phys_hist_kernel(
         }}
     }}
     __syncthreads();
-    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x)
-        hist[(long long)o * {N_HIST} + b] = s_hist[b];
+    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) {{
+        {acc} tot = 0;
+        for (int c = 0; c < {ncopy}; ++c) tot += s_all[c * {N_HIST} + b];
+        hist[(long long)o * {N_HIST} + b] = tot;
+    }}
 }}
 """
 
@@ -594,14 +602,17 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
     cp = _require_cupy()
     dtype = np.dtype(dtype).type
     real = "double" if dtype == np.float64 else "float"
-    acc = "double" if dtype == np.float64 else os.environ.get("LEPHARE_ACCEL_PHYS_ACC", "float")
+    acc = "double" if dtype == np.float64 else "float"
     acc_dtype = np.float64 if acc == "double" else np.float32
+    # FP32: one private float histogram per warp (8 x 1457 x 4 B fits the 48 KB default);
+    # FP64 keeps a single double histogram (its runtime is FP64-bound, not atomic-bound).
+    ncopy = 1 if acc == "double" else 8
     lib = _device_lib(cp, tensors, dtype=dtype)
     gal_on, dm_min, dm_max = _gal_priors(tensors, table.gal_idx, dtype)
-    key = (real, acc, gal_on)
+    key = (real, acc, ncopy, gal_on)
     if key not in _CUDA_KERNELS:
         mod = cp.RawModule(
-            code=_phys_cuda_src(real, acc),
+            code=_phys_cuda_src(real, acc, ncopy),
             options=("-std=c++11", f"-DUSE_PRIORS={int(gal_on)}"),
         )
         _CUDA_KERNELS[key] = mod.get_function("phys_hist_kernel")
@@ -658,7 +669,7 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
                 dtype(_dchi_cap(dtype)),
                 np.int32(table.col_analysis),
             ),
-            shared_mem=N_HIST * np.dtype(acc_dtype).itemsize,
+            shared_mem=ncopy * N_HIST * np.dtype(acc_dtype).itemsize,
         )
         out[o0:o1] = cp.asnumpy(d_hist).astype(np.float64)
     return out
