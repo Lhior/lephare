@@ -487,11 +487,13 @@ def clear_accel_caches() -> None:
 
 
 def _cache_fns(tensors: MagLibTensors, dtype, jax, jnp, platform: str):
-    key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, dtype, platform)
-    if key not in _FIT_CACHE:
-        clear_accel_caches()
-        _FIT_CACHE[key] = _build_fit_fns(tensors, dtype, jax, jnp)
-    return _FIT_CACHE[key]
+    from .maglib import cached_by_identity
+
+    def build():
+        clear_accel_caches()  # one device library at a time
+        return _build_fit_fns(tensors, dtype, jax, jnp)
+
+    return cached_by_identity(_FIT_CACHE, tensors, (np.dtype(dtype).str, platform), build, max_entries=1)
 
 
 def _pad_axis1(arr, pad, fill, jnp):

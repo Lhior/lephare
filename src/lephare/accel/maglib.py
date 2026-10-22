@@ -354,3 +354,25 @@ def load_maglib(path: str | Path) -> MagLibTensors:
         z_interp=z_interp,
         **phys,
     )
+
+
+def cached_by_identity(cache: dict, obj, extra: tuple, build, max_entries: int = 4):
+    """Memoize ``build()`` per (object identity, extra).
+
+    Keys on ``id(obj)`` but only hits while the cached weak reference still points to
+    ``obj``: a freed library's address can be reused by a new one of the same shape, and
+    address-keyed caches then returned the old library's device arrays. At most
+    ``max_entries`` are kept (each may hold device memory).
+    """
+    import weakref
+
+    key = (id(obj),) + tuple(extra)
+    hit = cache.get(key)
+    if hit is not None and hit[0]() is obj:
+        return hit[1]
+    value = build()
+    cache.pop(key, None)
+    while len(cache) >= max_entries:
+        cache.pop(next(iter(cache)))
+    cache[key] = (weakref.ref(obj), value)
+    return value

@@ -742,8 +742,9 @@ def _set_max_dynamic_smem(kernel, nbytes: int) -> None:
 
 def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
     dtype = np.dtype(dtype).type
-    key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, dtype)
-    if key not in _LIB_CACHE:
+    from .maglib import cached_by_identity
+
+    def build():
         flux = np.ascontiguousarray(tensors.flux, dtype=np.float64)
         fp32_scale = 1.0
         if dtype == np.float32:
@@ -764,7 +765,7 @@ def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
         dm_min, dm_max = _mag_abs_dm_bounds(
             mag0, z_lib, types, prior, tensors.funz0, dtype
         )
-        _LIB_CACHE[key] = {
+        return {
             "flux_bt": cp.asarray(flux_bt),
             "types": cp.asarray(types),
             "mag0": cp.asarray(mag0),
@@ -793,7 +794,8 @@ def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
             "dtype": dtype,
             "fp32_scale": fp32_scale,
         }
-    return _LIB_CACHE[key]
+
+    return cached_by_identity(_LIB_CACHE, tensors, (np.dtype(dtype).str,), build)
 
 
 def _normalize_pdf_host(pdf: np.ndarray, dz: np.ndarray) -> np.ndarray:

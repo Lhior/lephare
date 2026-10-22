@@ -85,16 +85,19 @@ def _get_batch_kernel(cp, dtype):
 
 
 def _device_flux(cp, flux: np.ndarray, dtype):
-    key = (flux.__array_interface__["data"][0], flux.shape, dtype)
-    if key not in _FLUX_CACHE:
-        _FLUX_CACHE[key] = cp.asarray(np.ascontiguousarray(flux.astype(dtype)))
-    return _FLUX_CACHE[key]
+    from .maglib import cached_by_identity
+
+    return cached_by_identity(
+        _FLUX_CACHE, flux, (np.dtype(dtype).str,),
+        lambda: cp.asarray(np.ascontiguousarray(flux.astype(dtype))),
+    )
 
 
 def _device_bay_zg(cp, tensors: MagLibTensors) -> tuple[BayZgIndex, dict]:
     """Host BayZgIndex plus cached device arrays for PDF / type mins."""
-    key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, id(tensors.types))
-    if key not in _INDEX_CACHE:
+    from .maglib import cached_by_identity
+
+    def build():
         index = prepare_bay_zg_index(tensors)
         qso_idx = np.flatnonzero(np.asarray(tensors.types) == 1)
         qso_bins = _z_bins(np.asarray(tensors.z)[qso_idx], index.gridz)
@@ -103,7 +106,7 @@ def _device_bay_zg(cp, tensors: MagLibTensors) -> tuple[BayZgIndex, dict]:
             "gal": [cp.asarray(index.gal_idx[c]) for c in index.bin_cols],
             "qso": [cp.asarray(qso_idx[qso_bins == b]) for b in range(index.n_z)],
         }
-        _INDEX_CACHE[key] = (
+        return (
             index,
             {
                 "gal_idx": cp.asarray(index.gal_idx),
@@ -117,7 +120,8 @@ def _device_bay_zg(cp, tensors: MagLibTensors) -> tuple[BayZgIndex, dict]:
                 "zbin_cols": zbin_cols,
             },
         )
-    return _INDEX_CACHE[key]
+
+    return cached_by_identity(_INDEX_CACHE, tensors, (), build)
 
 
 def _z_bins(z: np.ndarray, gridz: np.ndarray) -> np.ndarray:

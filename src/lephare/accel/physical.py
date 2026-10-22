@@ -19,6 +19,7 @@ host.
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -254,10 +255,11 @@ def _rf_color_bands(config: Mapping[str, Any], n_b: int) -> tuple[list[int], int
 
 def gal_phys_table(tensors: MagLibTensors, config: Mapping[str, Any]) -> GalPhysTable:
     flt, ref, col_ok = _rf_color_bands(config, int(tensors.n_bands))
-    key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, tuple(flt), ref)
+    # identity, not address: a freed library's address can be reused by a new one
+    key = (id(tensors), tuple(flt), ref)
     cached = _TABLE_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0]() is tensors:
+        return cached[1]
     gal = np.flatnonzero(np.asarray(tensors.types) == 0)
     mass = np.asarray(tensors.mass, dtype=np.float64)[gal]
     sfr = np.asarray(tensors.sfr, dtype=np.float64)[gal]
@@ -292,7 +294,7 @@ def gal_phys_table(tensors: MagLibTensors, config: Mapping[str, Any]) -> GalPhys
         col_analysis=bool(col_ok),
     )
     _TABLE_CACHE.clear()
-    _TABLE_CACHE[key] = table
+    _TABLE_CACHE[key] = (weakref.ref(tensors), table)
     return table
 
 

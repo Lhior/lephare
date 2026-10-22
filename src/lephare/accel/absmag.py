@@ -9,6 +9,7 @@ to ``Z_BEST`` and ``absmag`` combines them with the observed photometry.
 
 from __future__ import annotations
 
+import weakref
 from typing import Any, Mapping
 
 import numpy as np
@@ -68,10 +69,11 @@ def library_filters(tensors: MagLibTensors, config: Mapping[str, Any]):
     zbmin = keyword_doubles(config, "MABS_ZBIN", "0", nbin + 1)[:-1]
     zbmax = keyword_doubles(config, "MABS_ZBIN", "6", nbin + 1)[1:]
     magabscont = keyword_ints(config, "MABS_CONTEXT", "0")
-    key = (tensors.flux.__array_interface__["data"][0], tensors.flux.shape, method, tuple(bapp), tuple(bapp_op),
-           tuple(zbmin), tuple(zbmax), tuple(magabscont))
-    if key in _LIB_CACHE:
-        return _LIB_CACHE[key]
+    # identity, not address: a freed library's address can be reused by a new one
+    key = (id(tensors), method, tuple(bapp), tuple(bapp_op), tuple(zbmin), tuple(zbmax), tuple(magabscont))
+    hit = _LIB_CACHE.get(key)
+    if hit is not None and hit[0]() is tensors:
+        return hit[1]
 
     gal = np.flatnonzero(np.asarray(tensors.types) == 0)
     indz = indexz(np.asarray(tensors.z)[gal], gridz)
@@ -119,7 +121,7 @@ def library_filters(tensors: MagLibTensors, config: Mapping[str, Any]):
         np.maximum.at(hi[:, k], indz[sel], kc[sel, k])
     out = (best, hi - lo)
     _LIB_CACHE.clear()
-    _LIB_CACHE[key] = out
+    _LIB_CACHE[key] = (weakref.ref(tensors), out)
     return out
 
 
