@@ -105,6 +105,28 @@ def _choose_tiled_launch(n_z: int, n_b: int, nbytes: int) -> tuple[int, int, int
     return None
 
 
+# Float min via native integer atomics: IEEE bit patterns order like signed ints for
+# val >= 0 and reversed (as unsigned) for val < 0. A CAS loop here made pass1 ~12x
+# slower on large BC03 libraries even though only a few percent of calls update.
+_ATOMIC_MIN_SRC = {
+    "float": """
+__device__ __forceinline__ float atomicMinReal(float *addr, float val) {
+    return (val >= 0.0f)
+        ? __int_as_float(atomicMin((int *)addr, __float_as_int(val)))
+        : __uint_as_float(atomicMax((unsigned int *)addr, __float_as_uint(val)));
+}
+""",
+    "double": """
+__device__ __forceinline__ double atomicMinReal(double *addr, double val) {
+    return (val >= 0.0)
+        ? __longlong_as_double(atomicMin((long long *)addr, __double_as_longlong(val)))
+        : __longlong_as_double((long long)atomicMax(
+              (unsigned long long *)addr, (unsigned long long)__double_as_longlong(val)));
+}
+""",
+}
+
+
 def _fuse_kernels_src(real: str = "double") -> str:
     """Block-per-object fused pass1 / pass2; flux is ``[N_b, N_t]``.
 
@@ -117,33 +139,11 @@ def _fuse_kernels_src(real: str = "double") -> str:
     if real == "float":
         log10, exp, fmax, tiny, lit0 = "log10f", "expf", "fmaxf", "1e-30f", "0.0f"
         dchi_max = "80.0f"
-        atomic_min = """
-__device__ __forceinline__ float atomicMinReal(float *addr, float val) {
-    int *addr_i = (int *)addr;
-    int old = *addr_i, assumed;
-    do {
-        assumed = old;
-        if (__int_as_float(assumed) <= val) break;
-        old = atomicCAS(addr_i, assumed, __float_as_int(val));
-    } while (assumed != old);
-    return __int_as_float(old);
-}
-"""
+        atomic_min = _ATOMIC_MIN_SRC["float"]
     else:
         log10, exp, fmax, tiny, lit0 = "log10", "exp", "fmax", "1e-300", "0.0"
         dchi_max = "700.0"
-        atomic_min = """
-__device__ __forceinline__ double atomicMinReal(double *addr, double val) {
-    unsigned long long *addr_ull = (unsigned long long *)addr;
-    unsigned long long old = *addr_ull, assumed;
-    do {
-        assumed = old;
-        if (__longlong_as_double(assumed) <= val) break;
-        old = atomicCAS(addr_ull, assumed, __double_as_longlong(val));
-    } while (assumed != old);
-    return __longlong_as_double(old);
-}
-"""
+        atomic_min = _ATOMIC_MIN_SRC["double"]
     return f"""
 #define HIGH_CHI2 ({high})
 #define MAX_NZ {_MAX_NZ_SHARED}
@@ -415,32 +415,10 @@ def _fuse_tiled_kernels_src(real: str = "double") -> str:
     high = f"{HIGH_CHI2:.1f}"
     if real == "float":
         exp, lit0, dchi_max = "expf", "0.0f", "80.0f"
-        atomic_min = """
-__device__ __forceinline__ float atomicMinReal(float *addr, float val) {
-    int *addr_i = (int *)addr;
-    int old = *addr_i, assumed;
-    do {
-        assumed = old;
-        if (__int_as_float(assumed) <= val) break;
-        old = atomicCAS(addr_i, assumed, __float_as_int(val));
-    } while (assumed != old);
-    return __int_as_float(old);
-}
-"""
+        atomic_min = _ATOMIC_MIN_SRC["float"]
     else:
         exp, lit0, dchi_max = "exp", "0.0", "700.0"
-        atomic_min = """
-__device__ __forceinline__ double atomicMinReal(double *addr, double val) {
-    unsigned long long *addr_ull = (unsigned long long *)addr;
-    unsigned long long old = *addr_ull, assumed;
-    do {
-        assumed = old;
-        if (__longlong_as_double(assumed) <= val) break;
-        old = atomicCAS(addr_ull, assumed, __double_as_longlong(val));
-    } while (assumed != old);
-    return __longlong_as_double(old);
-}
-"""
+        atomic_min = _ATOMIC_MIN_SRC["double"]
     return f"""
 #define HIGH_CHI2 ({high})
 
