@@ -1059,10 +1059,8 @@ def ensure_filt_and_sedtolib(
             updated = dict(cfg)
         else:
             updated = overwrite_config(dict(cfg), lp.all_types_to_keymap(override))
-        lib_name = updated[f"{object_type}_LIB"].value
-        bin_path = _lib_bin_path(lib_name)
-        if bin_path.is_file():
-            continue
+        # Always rebuild, as lp.prepare does: run dirs are reused by stage name, so an
+        # existing lib_bin may come from a different SED configuration.
         sedlib = lp.Sedtolib(config_keymap=updated)
         list_loc = updated[f"{object_type}_SED"].value
         if list_loc.find("sed/") >= 0:
