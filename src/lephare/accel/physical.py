@@ -19,6 +19,7 @@ host.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -478,10 +479,17 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
 _CUDA_KERNELS: dict = {}
 
 
-def _phys_cuda_src(real: str) -> str:
+def _phys_cuda_src(real: str, acc: str = "double") -> str:
+    """``generatePDF`` histogram kernel. ``real`` is the per-template math type (chi2,
+    weights, bin indices); ``acc`` is the shared-memory histogram accumulator type.
+    FP64 uses double/double; FP32 runs its math in float (1:64 FP64 on consumer GPUs)."""
+
+    def lit(v) -> str:
+        return f"{float(v)!r}f" if real == "float" else f"{float(v)!r}"
+
     def grid_args(name):
         lo, hi, n = PHYS_PDF_GRIDS[name]
-        return f"{lo!r}, {hi!r}, {n}"
+        return f"{lit(lo)}, {lit(hi)}, {n}"
 
     off = {k: int(v) for k, v in _PDF_OFFSET.items()}
     return f"""
@@ -490,11 +498,11 @@ def _phys_cuda_src(real: str) -> str:
 #define USE_PRIORS 0
 #endif
 
-__device__ __forceinline__ int pdf_index(double v, double lo, double hi, int n) {{
+__device__ __forceinline__ int pdf_index({real} v, {real} lo, {real} hi, int n) {{
     if (v >= lo && v <= hi) {{
-        double x = (v - lo) * (1.0 / ((hi - lo) / (double)(n - 1)));
-        double f = floor(x);
-        return (int)f + ((x - f) >= 0.5 ? 1 : 0);
+        {real} x = (v - lo) * ({lit(1)} / ((hi - lo) / ({real})(n - 1)));
+        {real} f = floor(x);
+        return (int)f + ((x - f) >= {lit(0.5)} ? 1 : 0);
     }}
     if (v < lo) return 0;
     return n - 1;
@@ -508,22 +516,23 @@ void phys_hist_kernel(
     const {real}* __restrict__ base,
     const {real}* __restrict__ dm_min,
     const {real}* __restrict__ dm_max,
-    const double* __restrict__ chimin,
-    const double* __restrict__ lgmass,
-    const double* __restrict__ lgsfr,
-    const double* __restrict__ ltir,
-    const double* __restrict__ mref0,
+    const {real}* __restrict__ chimin,
+    const {real}* __restrict__ lgmass,
+    const {real}* __restrict__ lgsfr,
+    const {real}* __restrict__ ltir,
+    const {real}* __restrict__ mref0,
     const int* __restrict__ ssfr_bin,
     const int* __restrict__ age_bin,
     const int* __restrict__ col1_bin,
     const int* __restrict__ col2_bin,
-    double* __restrict__ hist,
-    int N_obj, int N_g, int N_b, double dchi_max, int col_analysis
+    {acc}* __restrict__ hist,
+    int N_obj, int N_g, int N_b, {real} dchi_max, int col_analysis
 ) {{
     int o = (int)blockIdx.x;
     if (o >= N_obj) return;
-    extern __shared__ double s_hist[];
-    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) s_hist[b] = 0.0;
+    extern __shared__ unsigned char s_raw[];
+    {acc}* s_hist = ({acc}*)s_raw;
+    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) s_hist[b] = 0;
     {real} r_inv2[16];
     {real} r_abinv[16];
     for (int k = 0; k < 16; ++k) {{
@@ -533,7 +542,7 @@ void phys_hist_kernel(
         }}
     }}
     {real} r_base = base[o];
-    double cmin = chimin[o];
+    {real} cmin = chimin[o];
     __syncthreads();
 
     for (int i = (int)threadIdx.x; i < N_g; i += (int)blockDim.x) {{
@@ -551,24 +560,24 @@ void phys_hist_kernel(
         if (dm > 0 && (dm <= dm_min[i] || dm >= dm_max[i])) chi2 = HIGH_CHI2;
 #endif
         if (chi2 >= HIGH_CHI2) continue;
-        double dchi = (double)chi2 - cmin;
-        if (dchi < 0.0) dchi = 0.0;
+        {real} dchi = chi2 - cmin;
+        if (dchi < 0) dchi = 0;
         if (dchi > dchi_max) continue;
-        double prob = exp(-0.5 * dchi);
-        double lgdm = log10((double)dm);
-        double lm = lgmass[i];
-        if (lgdm > -100.0 && lm > -100.0) {{
+        {real} prob = exp({lit(-0.5)} * dchi);
+        {real} lgdm = log10(dm);
+        {real} lm = lgmass[i];
+        if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
             atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
             atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
             atomicAdd(&s_hist[ssfr_bin[i]], prob);
             atomicAdd(&s_hist[age_bin[i]], prob);
-            if (ltir[i] >= 0.0)
+            if (ltir[i] >= 0)
                 atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
         }}
         if (col_analysis) {{
             atomicAdd(&s_hist[col1_bin[i]], prob);
             atomicAdd(&s_hist[col2_bin[i]], prob);
-            atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - 2.5 * lgdm, {grid_args('MREF')})], prob);
+            atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
         }}
     }}
     __syncthreads();
@@ -585,12 +594,14 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
     cp = _require_cupy()
     dtype = np.dtype(dtype).type
     real = "double" if dtype == np.float64 else "float"
+    acc = "double" if dtype == np.float64 else os.environ.get("LEPHARE_ACCEL_PHYS_ACC", "float")
+    acc_dtype = np.float64 if acc == "double" else np.float32
     lib = _device_lib(cp, tensors, dtype=dtype)
     gal_on, dm_min, dm_max = _gal_priors(tensors, table.gal_idx, dtype)
-    key = (real, gal_on)
+    key = (real, acc, gal_on)
     if key not in _CUDA_KERNELS:
         mod = cp.RawModule(
-            code=_phys_cuda_src(real),
+            code=_phys_cuda_src(real, acc),
             options=("-std=c++11", f"-DUSE_PRIORS={int(gal_on)}"),
         )
         _CUDA_KERNELS[key] = mod.get_function("phys_hist_kernel")
@@ -616,25 +627,17 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
     if not (n_obj and n_g):
         return out
     per_template = tuple(
-        cp.asarray(a)
-        for a in (
-            dm_min,
-            dm_max,
-            table.lgmass,
-            table.lgsfr,
-            table.ltir,
-            table.mref0,
-            table.ssfr_bin,
-            table.age_bin,
-            table.col1_bin,
-            table.col2_bin,
-        )
+        cp.asarray(a, dtype=dtype)
+        for a in (dm_min, dm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
+    ) + tuple(
+        cp.asarray(a, dtype=np.int32)
+        for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
     )
-    d_cmin = cp.asarray(chimin_gal, dtype=cp.float64)
-    chunk = 8192  # bounds the [chunk, N_HIST] float64 device histogram
+    d_cmin = cp.asarray(chimin_gal, dtype=dtype)
+    chunk = 8192  # bounds the [chunk, N_HIST] device histogram
     for o0 in range(0, n_obj, chunk):
         o1 = min(o0 + chunk, n_obj)
-        d_hist = cp.zeros((o1 - o0, N_HIST), dtype=cp.float64)
+        d_hist = cp.zeros((o1 - o0, N_HIST), dtype=acc_dtype)
         dmn, dmx, *tab = per_template
         kernel(
             (o1 - o0,),
@@ -652,12 +655,12 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
                 np.int32(o1 - o0),
                 np.int32(n_g),
                 np.int32(n_b),
-                np.float64(_dchi_cap(dtype)),
+                dtype(_dchi_cap(dtype)),
                 np.int32(table.col_analysis),
             ),
-            shared_mem=N_HIST * 8,
+            shared_mem=N_HIST * np.dtype(acc_dtype).itemsize,
         )
-        out[o0:o1] = cp.asnumpy(d_hist)
+        out[o0:o1] = cp.asnumpy(d_hist).astype(np.float64)
     return out
 
 

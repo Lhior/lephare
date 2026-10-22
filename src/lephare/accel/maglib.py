@@ -269,7 +269,7 @@ def _gal_mass_sfr_from_lib_bin(
     return mass, sfr
 
 
-def save_maglib(tensors: MagLibTensors, path: str | Path) -> None:
+def save_maglib(tensors: MagLibTensors, path: str | Path, compressed: bool = True) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     nummod = (
@@ -287,7 +287,7 @@ def save_maglib(tensors: MagLibTensors, path: str | Path) -> None:
         if tensors.ebv is not None
         else np.zeros(tensors.flux.shape[0], dtype=np.float64)
     )
-    np.savez_compressed(
+    (np.savez_compressed if compressed else np.savez)(
         path,
         flux=tensors.flux,
         z=tensors.z,
