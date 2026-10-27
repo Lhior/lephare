@@ -775,10 +775,9 @@ def fused_extra_obj_bytes(dtype) -> int:
     return N_HIST * (acc + 4 * 8)
 
 
-def _fused_src(real: str, acc: str, ncopy: int) -> str:
-    """``fuse_pass2_kernel`` (BAY_ZG p(z) over GAL templates) that also scatters the
-    ``phys_hist_kernel`` weights: same chi2, same ``prob``; the p(z) uses the fit's
-    MAG_ABS bounds and the histograms their own (as the two separate kernels do)."""
+def _phys_scatter_src(real: str, acc: str) -> str:
+    """``generatePDF`` weight scatter for one template ``i`` into one object's shared
+    histogram (``s_hist`` is that object's ``N_HIST`` row)."""
 
     def lit(v) -> str:
         return f"{float(v)!r}f" if real == "float" else f"{float(v)!r}"
@@ -788,9 +787,53 @@ def _fused_src(real: str, acc: str, ncopy: int) -> str:
         return f"{lit(lo)}, {lit(hi)}, {n}"
 
     off = {k: int(v) for k, v in _PDF_OFFSET.items()}
+    return f"""
+__device__ __forceinline__ void phys_scatter(
+    {acc}* s_hist, int i, {real} dchi, {real} dm,
+    const {real}* __restrict__ lgmass, const {real}* __restrict__ lgsfr,
+    const {real}* __restrict__ ltir, const {real}* __restrict__ mref0,
+    const int* __restrict__ ssfr_bin, const int* __restrict__ age_bin,
+    const int* __restrict__ col1_bin, const int* __restrict__ col2_bin, int col_analysis
+) {{
+    {real} prob = exp({lit(-0.5)} * dchi);
+    {real} lgdm = log10(dm);
+    {real} lm = lgmass[i];
+    if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
+        atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
+        atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
+        atomicAdd(&s_hist[ssfr_bin[i]], prob);
+        atomicAdd(&s_hist[age_bin[i]], prob);
+        if (ltir[i] >= 0)
+            atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
+    }}
+    if (col_analysis) {{
+        atomicAdd(&s_hist[col1_bin[i]], prob);
+        atomicAdd(&s_hist[col2_bin[i]], prob);
+        atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
+    }}
+}}
+"""
+
+
+def _fused_src(real: str, acc: str, ncopy: int, npdf: int = 0, ilp: int = 1, min_blocks: int = 0,
+               threads: int = 256) -> str:
+    """``fuse_pass2_kernel`` (BAY_ZG p(z) over GAL templates) that also scatters the
+    ``phys_hist_kernel`` weights: same chi2, same ``prob``; the p(z) uses the fit's
+    MAG_ABS bounds and the histograms their own (as the two separate kernels do).
+
+    One block per object streams the whole GAL library from L2/DRAM, so the kernel is
+    load-latency bound and occupancy matters: ``ncopy`` private histograms and ``npdf``
+    p(z) copies (0 = one per warp) cost shared memory per block, ``min_blocks`` > 0
+    caps registers via ``__launch_bounds__``, and ``ilp`` templates per thread and
+    iteration put more loads in flight. (Staging template tiles in shared memory for
+    several objects per block was slower on A100 and RTX 3070: the per-object
+    histograms leave too little shared memory for occupancy.)"""
     exp = "expf" if real == "float" else "exp"
-    return _phys_cuda_src(real, acc, ncopy) + f"""
-extern "C" __global__
+    bounds = f"__launch_bounds__({int(threads)}, {int(min_blocks)})" if min_blocks else ""
+    pdf_copies = "nwarps" if npdf <= 0 else str(int(npdf))
+    return _phys_cuda_src(real, acc, ncopy) + _phys_scatter_src(real, acc) + f"""
+#define ILP {int(ilp)}
+extern "C" __global__ {bounds}
 void pass2_phys_kernel(
     const {real}* __restrict__ flux_bt,
     const {real}* __restrict__ invsabSq,
@@ -819,11 +862,13 @@ void pass2_phys_kernel(
     if (o >= N_obj) return;
     const int nwarps = (int)blockDim.x / 32;
     const int warp = (int)threadIdx.x / 32;
+    const int npdf = {pdf_copies};
     extern __shared__ unsigned char raw[];
     {real} *s_pdf = ({real} *)raw;
-    size_t pdf_bytes = (((size_t)nwarps * N_z * sizeof({real}) + 15) / 16) * 16;
+    size_t pdf_bytes = (((size_t)npdf * N_z * sizeof({real}) + 15) / 16) * 16;
     {acc} *s_all = ({acc} *)(raw + pdf_bytes);
     {acc} *s_hist = s_all + (warp % {ncopy}) * {N_HIST};
+    {real} *w_pdf = s_pdf + (warp % npdf) * N_z;
 #ifdef N_B
     const int nb = N_B;
 #else
@@ -840,66 +885,68 @@ void pass2_phys_kernel(
     }}
     {real} r_base = base[o];
     {real} cmin = chimin_gal[o];
-    for (int b = (int)threadIdx.x; b < nwarps * N_z; b += (int)blockDim.x) s_pdf[b] = 0;
+    for (int b = (int)threadIdx.x; b < npdf * N_z; b += (int)blockDim.x) s_pdf[b] = 0;
     for (int b = (int)threadIdx.x; b < {ncopy} * {N_HIST}; b += (int)blockDim.x) s_all[b] = 0;
     __syncthreads();
 
-    for (int i = (int)threadIdx.x; i < N_t; i += (int)blockDim.x) {{
-        {real} avmago = 0;
-        {real} avmagt = 0;
+    const int stride = (int)blockDim.x;
+    for (int i0 = (int)threadIdx.x; i0 < N_t; i0 += ILP * stride) {{
+        {real} avmago[ILP], avmagt[ILP];
+#pragma unroll
+        for (int u = 0; u < ILP; ++u) {{
+            avmago[u] = 0;
+            avmagt[u] = 0;
+        }}
 #ifdef N_B
 #pragma unroll
         for (int k = 0; k < N_B; ++k) {{
 #else
         for (int k = 0; k < nb; ++k) {{
 #endif
-            {real} f = flux_bt[k * N_t + i];
-            avmago += f * r_abinv[k];
-            avmagt += f * f * r_inv2[k];
-        }}
-        {real} chi2 = r_base;
-        if (avmagt > 0) chi2 = r_base - (avmago * avmago) / avmagt;
-        {real} dm = (avmagt > 0) ? (avmago / avmagt) : ({real})(-999.0);
-        {real} chi2_pdf = chi2;
-        {real} chi2_h = chi2;
-#if USE_PRIORS
-        if (dm > 0 && (dm <= dm_min[i] || dm >= dm_max[i])) chi2_pdf = HIGH_CHI2;
-        if (dm > 0 && (dm <= hdm_min[i] || dm >= hdm_max[i])) chi2_h = HIGH_CHI2;
-#endif
-        if (chi2_pdf < HIGH_CHI2) {{
-            {real} dchi = chi2_pdf - cmin;
-            if (dchi < 0) dchi = 0;
-            if (dchi <= dchi_max) {{
-                int zb = z_bin[i];
-                if (zb >= 0 && zb < N_z)
-                    atomicAdd(&s_pdf[warp * N_z + zb], {exp}(({real})(-0.5) * dchi));
+#pragma unroll
+            for (int u = 0; u < ILP; ++u) {{
+                int i = i0 + u * stride;
+                if (i < N_t) {{
+                    {real} f = flux_bt[k * N_t + i];
+                    avmago[u] += f * r_abinv[k];
+                    avmagt[u] += f * f * r_inv2[k];
+                }}
             }}
         }}
-        if (chi2_h >= HIGH_CHI2) continue;
-        {real} dchi = chi2_h - cmin;
-        if (dchi < 0) dchi = 0;
-        if (dchi > dchi_max) continue;
-        {real} prob = exp({lit(-0.5)} * dchi);
-        {real} lgdm = log10(dm);
-        {real} lm = lgmass[i];
-        if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
-            atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
-            atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
-            atomicAdd(&s_hist[ssfr_bin[i]], prob);
-            atomicAdd(&s_hist[age_bin[i]], prob);
-            if (ltir[i] >= 0)
-                atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
-        }}
-        if (col_analysis) {{
-            atomicAdd(&s_hist[col1_bin[i]], prob);
-            atomicAdd(&s_hist[col2_bin[i]], prob);
-            atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
+#pragma unroll
+        for (int u = 0; u < ILP; ++u) {{
+            int i = i0 + u * stride;
+            if (i >= N_t) continue;
+            {real} chi2 = r_base;
+            if (avmagt[u] > 0) chi2 = r_base - (avmago[u] * avmago[u]) / avmagt[u];
+            {real} dm = (avmagt[u] > 0) ? (avmago[u] / avmagt[u]) : ({real})(-999.0);
+            {real} chi2_pdf = chi2;
+            {real} chi2_h = chi2;
+#if USE_PRIORS
+            if (dm > 0 && (dm <= dm_min[i] || dm >= dm_max[i])) chi2_pdf = HIGH_CHI2;
+            if (dm > 0 && (dm <= hdm_min[i] || dm >= hdm_max[i])) chi2_h = HIGH_CHI2;
+#endif
+            if (chi2_pdf < HIGH_CHI2) {{
+                {real} dchi = chi2_pdf - cmin;
+                if (dchi < 0) dchi = 0;
+                if (dchi <= dchi_max) {{
+                    int zb = z_bin[i];
+                    if (zb >= 0 && zb < N_z)
+                        atomicAdd(&w_pdf[zb], {exp}(({real})(-0.5) * dchi));
+                }}
+            }}
+            if (chi2_h >= HIGH_CHI2) continue;
+            {real} dchi = chi2_h - cmin;
+            if (dchi < 0) dchi = 0;
+            if (dchi > dchi_max) continue;
+            phys_scatter(s_hist, i, dchi, dm, lgmass, lgsfr, ltir, mref0, ssfr_bin, age_bin,
+                         col1_bin, col2_bin, col_analysis);
         }}
     }}
     __syncthreads();
     for (int b = (int)threadIdx.x; b < N_z; b += (int)blockDim.x) {{
         {real} a = 0;
-        for (int w = 0; w < nwarps; ++w) a += s_pdf[w * N_z + b];
+        for (int w = 0; w < npdf; ++w) a += s_pdf[w * N_z + b];
         pdf[o * N_z + b] = a;
     }}
     for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) {{
@@ -920,13 +967,22 @@ def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n
     dtype = np.dtype(dtype).type
     real = "double" if dtype == np.float64 else "float"
     acc_dtype = np.float64 if dtype == np.float64 else np.float32
-    ncopy = int(os.environ.get("LEPHARE_ACCEL_PHYS_NCOPY", "1" if dtype == np.float64 else "4"))
-    key = (real, ncopy, bool(use_priors), int(unroll))
+    nbytes = np.dtype(dtype).itemsize
+    # Defaults from an A100 sweep (benchmarks/diffsky/kbench.py, BC03 diffsky, 20k objects):
+    # one shared histogram + one p(z) copy and 8 blocks/SM beat per-warp copies (FP32
+    # 433 -> 278 ms, FP64 1150 -> 727 ms with 2 templates per thread).
+    env = os.environ.get
+    ncopy = int(env("LEPHARE_ACCEL_PHYS_NCOPY", "1"))
+    npdf = int(env("LEPHARE_ACCEL_PHYS_NPDF", "1"))
+    ilp = max(1, int(env("LEPHARE_ACCEL_PHYS_ILP", "2" if dtype == np.float64 else "1")))
+    min_blocks = int(env("LEPHARE_ACCEL_PHYS_MIN_BLOCKS", "8"))
+    key = (real, ncopy, npdf, ilp, min_blocks, int(threads), bool(use_priors), int(unroll))
     if key not in _FUSED_KERNELS:
         opts = ["-std=c++11", f"-DUSE_PRIORS={int(use_priors)}"]
         if unroll:
             opts.append(f"-DN_B={int(unroll)}")
-        mod = cp.RawModule(code=_fused_src(real, real, ncopy), options=tuple(opts))
+        src = _fused_src(real, real, ncopy, npdf, ilp, min_blocks, threads)
+        mod = cp.RawModule(code=src, options=tuple(opts))
         _FUSED_KERNELS[key] = mod.get_function("pass2_phys_kernel")
     kernel = _FUSED_KERNELS[key]
 
@@ -946,9 +1002,8 @@ def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n
 
     n_obj = int(d_base.shape[0])
     n_gal = int(lib["n_gal"])
-    nbytes = np.dtype(dtype).itemsize
-    nwarps = threads // 32
-    smem = ((nwarps * n_z * nbytes + 15) // 16) * 16 + ncopy * N_HIST * np.dtype(acc_dtype).itemsize
+    n_pdf = threads // 32 if npdf <= 0 else npdf
+    smem = ((n_pdf * n_z * nbytes + 15) // 16) * 16 + ncopy * N_HIST * np.dtype(acc_dtype).itemsize
     _set_max_dynamic_smem(kernel, smem)
     d_hist = cp.empty((n_obj, N_HIST), dtype=acc_dtype)
     kernel(
