@@ -151,72 +151,78 @@ def _grid(name: str) -> np.ndarray:
     return lo + np.arange(n, dtype=np.float64) * step
 
 
-def _interp_x(level, c1, x1, c2, x2):
+def _interp_x(level, c1, x1, c2, x2, xp=np):
     """``PDF::linear_interp(level, c1, x1, c2, x2)`` (x from cumulant level)."""
     slope_ok = c2 > c1
-    denom = np.where(slope_ok, c2 - c1, 1.0)
-    return np.where(slope_ok, x1 + (level - c1) * (x2 - x1) / denom, x1)
+    denom = xp.where(slope_ok, c2 - c1, 1.0)
+    return xp.where(slope_ok, x1 + (level - c1) * (x2 - x1) / denom, x1)
 
 
-def _normalized_cumulant(pdf: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _normalized_cumulant(pdf, x, xp=np):
     """``PDF::normalization`` then trapezoid cumulant / last; returns (cum, defined)."""
-    width = np.diff(x)
-    area = np.sum((pdf[:, :-1] + pdf[:, 1:]) / 2.0 * width, axis=1)
-    pdf = np.where(area[:, None] > 0, pdf / np.where(area > 0, area, 1.0)[:, None], pdf)
-    cum = np.zeros_like(pdf)
-    cum[:, 1:] = np.cumsum(width * (pdf[:, 1:] + pdf[:, :-1]) / 2.0, axis=1)
+    width = xp.diff(x)
+    area = xp.sum((pdf[:, :-1] + pdf[:, 1:]) / 2.0 * width, axis=1)
+    pdf = xp.where(area[:, None] > 0, pdf / xp.where(area > 0, area, 1.0)[:, None], pdf)
+    cum = xp.zeros_like(pdf)
+    cum[:, 1:] = xp.cumsum(width * (pdf[:, 1:] + pdf[:, :-1]) / 2.0, axis=1)
     last = cum[:, -1]
     defined = last > 0
-    cum = np.where(defined[:, None], cum / np.where(defined, last, 1.0)[:, None], cum)
+    cum = xp.where(defined[:, None], cum / xp.where(defined, last, 1.0)[:, None], cum)
     return cum, defined
 
 
-def _upper_bound(cum: np.ndarray, level: np.ndarray) -> np.ndarray:
+def _upper_bound(cum, level, xp=np):
     """Row-wise ``std::upper_bound`` index for monotone rows."""
-    return np.sum(cum <= level[:, None], axis=1)
+    return xp.sum(cum <= level[:, None], axis=1)
 
 
-def _take(a: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    return np.take_along_axis(a, idx[:, None], axis=1)[:, 0]
+def _take(a, idx, xp=np):
+    return xp.take_along_axis(a, idx[:, None], axis=1)[:, 0]
 
 
-def pdf_median_interval(pdf: np.ndarray, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``levelCumu2x(0.5)`` and ``credible_interval(68, median)`` for each row."""
-    x = _grid(name)
+def pdf_median_interval(pdf, name: str, xp=np):
+    """``levelCumu2x(0.5)`` and ``credible_interval(68, median)`` for each row.
+
+    Runs on ``xp`` (NumPy or CuPy) arrays; returns arrays on the same device.
+    """
+    x = xp.asarray(_grid(name))
     lo, hi, n = PHYS_PDF_GRIDS[name]
     n_obj = pdf.shape[0]
-    cum, defined = _normalized_cumulant(np.asarray(pdf, dtype=np.float64), x)
+    cum, defined = _normalized_cumulant(xp.asarray(pdf, dtype=xp.float64), x, xp)
 
-    half = np.full(n_obj, 0.5)
-    ind = _upper_bound(cum, half)
-    ind_c = np.clip(ind, 1, n - 1)
-    med = _interp_x(half, _take(cum, ind_c - 1), x[ind_c - 1], _take(cum, ind_c), x[ind_c])
-    med = np.where(ind > 0, med, x[0])
-    med = np.where(defined, med, INVALID_Z)
+    def _take_(a, idx):
+        return _take(a, idx, xp)
+
+    half = xp.full(n_obj, 0.5)
+    ind = _upper_bound(cum, half, xp)
+    ind_c = xp.clip(ind, 1, n - 1)
+    med = _interp_x(half, _take_(cum, ind_c - 1), x[ind_c - 1], _take_(cum, ind_c), x[ind_c], xp)
+    med = xp.where(ind > 0, med, x[0])
+    med = xp.where(defined, med, INVALID_Z)
 
     # credible_interval(level=68 as float, val=med)
     level = float(np.float32(np.float32(68.0) / 100.0))
     inside = (med >= lo) & (med < hi) & defined
     step = (hi - lo) / (n - 1)
-    idx_lo = np.clip(((np.where(inside, med, lo) - lo) / step).astype(np.int64), 0, n - 2)
-    c_lo = _take(cum, idx_lo)
-    c_hi = _take(cum, idx_lo + 1)
+    idx_lo = xp.clip(((xp.where(inside, med, lo) - lo) / step).astype(xp.int64), 0, n - 2)
+    c_lo = _take_(cum, idx_lo)
+    c_hi = _take_(cum, idx_lo + 1)
     cum_val = c_lo + (c_hi - c_lo) / (x[idx_lo + 1] - x[idx_lo]) * (med - x[idx_lo])
     left = cum_val
     right = 1.0 - left
     both = (right >= level / 2.0) & (left >= level / 2.0)
-    upper = np.where(both, left + level / 2.0, np.where(right <= level / 2.0, 1.0, level))
-    lower = np.where(both, left - level / 2.0, np.where(right <= level / 2.0, 1.0 - level, 0.0))
+    upper = xp.where(both, left + level / 2.0, xp.where(right <= level / 2.0, 1.0, level))
+    lower = xp.where(both, left - level / 2.0, xp.where(right <= level / 2.0, 1.0 - level, 0.0))
 
     def _bound(target):
-        ind = np.clip(_upper_bound(cum, target), 1, n)
-        c_prev = _take(cum, ind - 1)
-        ind_hi = np.minimum(ind, n - 1)
-        val = _interp_x(target, c_prev, x[ind - 1], _take(cum, ind_hi), x[ind_hi])
-        return np.where(c_prev < target, val, x[ind - 1])
+        ind = xp.clip(_upper_bound(cum, target, xp), 1, n)
+        c_prev = _take_(cum, ind - 1)
+        ind_hi = xp.minimum(ind, n - 1)
+        val = _interp_x(target, c_prev, x[ind - 1], _take_(cum, ind_hi), x[ind_hi], xp)
+        return xp.where(c_prev < target, val, x[ind - 1])
 
-    inf = np.where(inside, _bound(lower), med)
-    sup = np.where(inside, _bound(upper), med)
+    inf = xp.where(inside, _bound(lower), med)
+    sup = xp.where(inside, _bound(upper), med)
     return med, inf, sup
 
 
@@ -597,9 +603,12 @@ void phys_hist_kernel(
 """
 
 
-def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype):
+def _phys_cuda_chunks(mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype, consume):
+    """Run the CUDA ``generatePDF`` histogram over VRAM-sized object chunks and call
+    ``consume(o0, o1, d_hist)`` with each device histogram ``[o1 - o0, N_HIST]``."""
     from .cuda_backend import prepare_photometry_cuda_device
     from .cuda_template import _device_lib, _require_cupy
+    from .gpu_util import run_with_oom_backoff, suggest_obj_chunk
 
     cp = _require_cupy()
     dtype = np.dtype(dtype).type
@@ -620,25 +629,10 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
         _CUDA_KERNELS[key] = mod.get_function("phys_hist_kernel")
     kernel = _CUDA_KERNELS[key]
 
-    d_ab, d_sab, _bus, _busul, _nbul = prepare_photometry_cuda_device(
-        mags, magerrs, tensors, context=context, offsets=offsets, dtype=dtype
-    )
-    if dtype == np.float32:
-        scale = cp.asarray(lib["fp32_scale"], dtype=cp.float32)
-        d_ab = d_ab * scale
-        d_sab = d_sab * scale
-    d_bus = cp.asarray(busnorma, dtype=dtype)
-    zero = cp.asarray(0, dtype=dtype)
-    d_inv = cp.where(d_bus > 0, d_bus / d_sab, zero)
-    d_inv2 = d_inv * d_inv
-    d_abinv = d_ab * d_inv2
-    d_base = cp.sum((d_ab * d_inv) ** 2, axis=1)
-
     n_obj, n_b = mags.shape
     n_g = int(table.gal_idx.size)
-    out = np.zeros((n_obj, N_HIST), dtype=np.float64)
     if not (n_obj and n_g):
-        return out
+        return False
     per_template = tuple(
         cp.asarray(a, dtype=dtype)
         for a in (dm_min, dm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
@@ -646,10 +640,27 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
         cp.asarray(a, dtype=np.int32)
         for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
     )
-    d_cmin = cp.asarray(chimin_gal, dtype=dtype)
-    chunk = 8192  # bounds the [chunk, N_HIST] device histogram
-    for o0 in range(0, n_obj, chunk):
-        o1 = min(o0 + chunk, n_obj)
+    ctx = None if context is None else np.asarray(context)
+    per_obj_ctx = ctx is not None and ctx.ndim > 0 and ctx.shape[0] == n_obj
+    nbytes = np.dtype(dtype).itemsize
+
+    def run(o0, o1):
+        c = ctx[o0:o1] if per_obj_ctx else ctx
+        d_ab, d_sab, _bus, _busul, _nbul = prepare_photometry_cuda_device(
+            mags[o0:o1], magerrs[o0:o1], tensors, context=c, offsets=offsets, dtype=dtype
+        )
+        if dtype == np.float32:
+            scale = cp.asarray(lib["fp32_scale"], dtype=cp.float32)
+            d_ab = d_ab * scale
+            d_sab = d_sab * scale
+        d_bus = cp.asarray(busnorma[o0:o1], dtype=dtype)
+        zero = cp.asarray(0, dtype=dtype)
+        d_inv = cp.where(d_bus > 0, d_bus / d_sab, zero)
+        d_inv2 = cp.ascontiguousarray(d_inv * d_inv)
+        d_abinv = cp.ascontiguousarray(d_ab * d_inv2)
+        d_base = cp.ascontiguousarray(cp.sum((d_ab * d_inv) ** 2, axis=1))
+        del d_ab, d_sab, d_bus, d_inv, _bus, _busul, _nbul
+        d_cmin = cp.asarray(chimin_gal[o0:o1], dtype=dtype)
         d_hist = cp.zeros((o1 - o0, N_HIST), dtype=acc_dtype)
         dmn, dmx, *tab = per_template
         kernel(
@@ -657,12 +668,12 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
             (256,),
             (
                 lib["flux_gal"],
-                cp.ascontiguousarray(d_inv2[o0:o1]),
-                cp.ascontiguousarray(d_abinv[o0:o1]),
-                cp.ascontiguousarray(d_base[o0:o1]),
+                d_inv2,
+                d_abinv,
+                d_base,
                 dmn,
                 dmx,
-                cp.ascontiguousarray(d_cmin[o0:o1]),
+                d_cmin,
                 *tab,
                 d_hist,
                 np.int32(o1 - o0),
@@ -673,7 +684,50 @@ def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tenso
             ),
             shared_mem=ncopy * N_HIST * np.dtype(acc_dtype).itemsize,
         )
+        consume(o0, o1, d_hist)
+
+    # Histogram + float64 cumulant temporaries of the statistics (~4 N_HIST doubles)
+    # dominate; photometry prep is ~12 band vectors.
+    per_obj = N_HIST * (np.dtype(acc_dtype).itemsize + 4 * 8) + 12 * n_b * nbytes
+    chunk = suggest_obj_chunk(per_obj, min_chunk=256)
+    run_with_oom_backoff(run, n_obj, chunk, min_chunk=256, tag="phys_hist")
+    return True
+
+
+def _phys_hist_cuda(mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype):
+    from .cuda_template import _require_cupy
+
+    cp = _require_cupy()
+    out = np.zeros((mags.shape[0], N_HIST), dtype=np.float64)
+
+    def consume(o0, o1, d_hist):
         out[o0:o1] = cp.asnumpy(d_hist).astype(np.float64)
+
+    _phys_cuda_chunks(mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype, consume)
+    return out
+
+
+def _phys_props_cuda(keys, mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype):
+    """:func:`pdf_properties` of the CUDA histograms, reduced on the device per chunk
+    (the ``[N, N_HIST]`` histogram never reaches the host)."""
+    from .cuda_template import _require_cupy
+
+    cp = _require_cupy()
+    n_obj = mags.shape[0]
+    out: dict[str, np.ndarray] = {}
+
+    def consume(o0, o1, d_hist):
+        props = pdf_properties(d_hist.astype(cp.float64), keys, xp=cp)
+        for k, v in props.items():
+            if k not in out:
+                out[k] = np.empty(n_obj, dtype=np.float64)
+            out[k][o0:o1] = cp.asnumpy(v)
+
+    ran = _phys_cuda_chunks(
+        mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype, consume
+    )
+    if not ran:
+        return pdf_properties(np.zeros((n_obj, N_HIST)), keys)
     return out
 
 
@@ -763,12 +817,12 @@ def best_fit_properties(valid, dmmin, indmin_gal, tensors) -> dict[str, np.ndarr
     return out
 
 
-def pdf_properties(hist: np.ndarray, keys) -> dict[str, np.ndarray]:
+def pdf_properties(hist, keys, xp=np) -> dict:
     out = {}
     names = sorted({PDF_KEYS[k][0] for k in keys if k in PDF_KEYS}, key=_PDF_NAMES.index)
     for name in names:
         o = int(_PDF_OFFSET[name])
-        stats = pdf_median_interval(hist[:, o : o + PHYS_PDF_GRIDS[name][2]], name)
+        stats = pdf_median_interval(hist[:, o : o + PHYS_PDF_GRIDS[name][2]], name, xp)
         for suffix, pos in (("MED", 0), ("INF", 1), ("SUP", 2)):
             out[f"{name}_{suffix}"] = stats[pos]
     return {k: v for k, v in out.items() if k in keys}
@@ -823,19 +877,19 @@ def galaxy_properties(
         out.update(best_fit_properties(valid, dmmin, indmin_gal, tensors))
     if any(k in PDF_KEYS for k in keys):
         table = gal_phys_table(tensors, config)
-        hist = phys_hist(
-            backend,
-            mags,
-            magerrs,
-            context,
-            offsets,
-            busnorma,
-            np.asarray(fit["CHI_BEST"], dtype=np.float64),
-            tensors,
-            table,
-            dtype=dtype,
-        )
-        out.update(pdf_properties(hist, keys))
+        chimin_gal = np.asarray(fit["CHI_BEST"], dtype=np.float64)
+        if backend.startswith("cuda"):
+            out.update(
+                _phys_props_cuda(
+                    keys, mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype
+                )
+            )
+        else:
+            hist = phys_hist(
+                backend, mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table,
+                dtype=dtype,
+            )
+            out.update(pdf_properties(hist, keys))
     if any(k in ABSMAG_KEYS for k in keys):
         from .absmag import absolute_magnitudes
 

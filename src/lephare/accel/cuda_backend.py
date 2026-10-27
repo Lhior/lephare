@@ -569,12 +569,15 @@ def _process_batch_cuda_core(
     index, d_aux = _device_bay_zg(cp, tensors)
     d_zgrid = cp.asarray(tensors.gridz, dtype=np.float64)
 
+    nbul = np.asarray(nbul).astype(np.int64)
     for start in range(0, n_obj, chunk):
         end = min(start + chunk, n_obj)
-        ul_idx = [i for i in range(start, end) if int(nbul[i]) > 0]
-        batch_idx = [i for i in range(start, end) if int(nbul[i]) == 0]
+        rng = np.arange(start, end)
+        ul_idx = rng[nbul[start:end] > 0]
+        batch_idx = rng[nbul[start:end] == 0]
 
         for i in ul_idx:
+            i = int(i)
             chi2, _, _, bus = rm_discrepant(
                 ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
             )
@@ -584,10 +587,10 @@ def _process_batch_cuda_core(
             zmode[i] = zm[0]
             zmean[i] = zmn[0]
 
-        if not batch_idx:
+        if batch_idx.size == 0:
             continue
 
-        sel = np.asarray(batch_idx, dtype=np.int64)
+        sel = batch_idx
         d_chi2, _d_dm = _chi2_cuda_batch_device(
             tensors.flux,
             ab[sel],
@@ -604,19 +607,15 @@ def _process_batch_cuda_core(
         )
         del _d_dm
 
-        improved = cp.asnumpy(_improved_device(cp, d_chi2, d_aux["types"]))
-        easy_j = []
-        easy_i = []
-        hard = []
-        for j, i in enumerate(batch_idx):
-            if float(improved[j]) > threshold:
-                hard.append((j, i))
-            else:
-                easy_j.append(j)
-                easy_i.append(i)
+        improved = np.asarray(cp.asnumpy(_improved_device(cp, d_chi2, d_aux["types"])), dtype=np.float64)
+        is_hard = improved > threshold
+        easy_j = np.flatnonzero(~is_hard)
+        easy_i = batch_idx[easy_j]
+        hard_j_all = np.flatnonzero(is_hard)
+        hard = list(zip(hard_j_all.tolist(), batch_idx[hard_j_all].tolist()))
 
-        if easy_j:
-            easy_j_np = np.asarray(easy_j, dtype=np.int64)
+        if easy_j.size:
+            easy_j_np = easy_j
             d_pdf = _bay_zg_pdf_device(
                 cp,
                 d_chi2[easy_j_np],
@@ -626,7 +625,7 @@ def _process_batch_cuda_core(
                 d_aux["dz"],
             )
             d_zm, d_zmn = _zancil_device(cp, d_pdf, d_zgrid)
-            easy_i_np = np.asarray(easy_i)
+            easy_i_np = easy_i
             pdfs[easy_i_np] = cp.asnumpy(d_pdf)
             zmode[easy_i_np] = cp.asnumpy(d_zm)
             zmean[easy_i_np] = cp.asnumpy(d_zmn)

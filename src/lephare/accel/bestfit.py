@@ -58,6 +58,67 @@ def improve_extremum_chi2(xaxis: np.ndarray, chi2: np.ndarray) -> tuple[float, f
         return float(xaxis[id_]), float(chi2[id_])
 
 
+def improve_extremum_chi2_rows(xaxis: np.ndarray, chi2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Row-wise :func:`improve_extremum_chi2` for ``chi2[N, n]`` (same float64 ops)."""
+    xaxis = np.asarray(xaxis, dtype=np.float64)
+    chi2 = np.asarray(chi2, dtype=np.float64)
+    n_obj, n = chi2.shape
+    if n == 0:
+        return np.full(n_obj, INVALID_Z), np.full(n_obj, HIGH_CHI2)
+    rows = np.arange(n_obj)
+    id_ = np.argmin(chi2, axis=1)
+    x_id = xaxis[id_]
+    y_id = chi2[rows, id_]
+    if n < 3:
+        return x_id, y_id
+    mid = np.clip(id_, 1, n - 2)
+    x1, x2, x3 = xaxis[mid - 1], xaxis[mid], xaxis[mid + 1]
+    y1, y2, y3 = chi2[rows, mid - 1], chi2[rows, mid], chi2[rows, mid + 1]
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        x23 = x2 - x3
+        x31 = x3 - x1
+        x12 = x1 - x2
+        delta = x23 * x1 * x1 + x31 * x2 * x2 + x12 * x3 * x3
+        a = y1 * x23 + y2 * x31 + y3 * x12
+        b = y1 * (x2 * x2 - x3 * x3) - y2 * (x1 * x1 - x3 * x3) + y3 * (x1 * x1 - x2 * x2)
+        c = y1 * x2 * x3 * x23 + y2 * x1 * x3 * x31 + y3 * x1 * x2 * x12
+        ba = b / a
+        xmin = 0.5 * ba
+        ymin = -0.25 * ba * b / delta + c / delta
+    quad = (
+        (id_ > 0)
+        & (id_ < n - 1)
+        & ~((y1 >= HIGH_CHI2) | (y2 >= HIGH_CHI2) | (y3 >= HIGH_CHI2))
+        & ~((np.abs(x2 - x1) > 0.5) | (np.abs(x3 - x2) > 0.5))
+        & ~((a == 0.0) | (delta == 0.0))
+    )
+    return np.where(quad, xmin, x_id), np.where(quad, ymin, y_id)
+
+
+def _winner_redshifts(indmin, z_lib, nummod, gridz, min_zg, min_zq, z_interp):
+    """Z_BEST / ZQ_BEST / MOD_STAR from per-type winners (+ MIN_ZG/ZQ interpolation)."""
+    n_obj = indmin.shape[0]
+
+    def _pick(col, values, fill):
+        ok = indmin[:, col] >= 0
+        out = np.full(n_obj, fill, dtype=np.float64)
+        out[ok] = values[indmin[ok, col]]
+        return out, ok
+
+    z_best, ok_g = _pick(0, z_lib, INVALID_Z)
+    zq_best, ok_q = _pick(1, z_lib, INVALID_Z)
+    mod_star, _ = _pick(2, nummod.astype(np.float64), float(INVALID_INDEX))
+    if z_interp:
+        for dest, ok, mins in ((z_best, ok_g, min_zg), (zq_best, ok_q, min_zq)):
+            if mins is None:
+                continue
+            mins = np.asarray(mins, dtype=np.float64)
+            sel = np.flatnonzero(ok & (np.min(mins, axis=1) < HIGH_CHI2))
+            if sel.size:
+                dest[sel], _ = improve_extremum_chi2_rows(gridz, mins[sel])
+    return z_best, zq_best, mod_star
+
+
 def _type_argmins(chi2: np.ndarray, types: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per-object argmin / min χ² for types 0,1,2. ``chi2`` is ``[N, Nt]`` or ``[Nt]``."""
     chi2 = np.asarray(chi2, dtype=np.float64)
@@ -161,27 +222,13 @@ def bestfit_ancil_from_chi2(
     else:
         nummod = np.asarray(nummod, dtype=np.int32)
 
-    z_best = np.full(n_obj, INVALID_Z, dtype=np.float64)
-    zq_best = np.full(n_obj, INVALID_Z, dtype=np.float64)
-    mod_star = np.full(n_obj, float(INVALID_INDEX), dtype=np.float64)
-
-    for i in range(n_obj):
-        if indmin[i, 0] >= 0:
-            z_best[i] = z_lib[indmin[i, 0]]
-        if indmin[i, 1] >= 0:
-            zq_best[i] = z_lib[indmin[i, 1]]
-        if indmin[i, 2] >= 0:
-            mod_star[i] = float(nummod[indmin[i, 2]])
-
+    min_zg = min_zq = None
     if z_interp:
         min_zg = min_chi2_per_zbin(chi2, tensors.types, z_lib, tensors.gridz, 0)
         min_zq = min_chi2_per_zbin(chi2, tensors.types, z_lib, tensors.gridz, 1)
-        gridz = np.asarray(tensors.gridz, dtype=np.float64)
-        for i in range(n_obj):
-            if indmin[i, 0] >= 0 and np.min(min_zg[i]) < HIGH_CHI2:
-                z_best[i], _ = improve_extremum_chi2(gridz, min_zg[i])
-            if indmin[i, 1] >= 0 and np.min(min_zq[i]) < HIGH_CHI2:
-                zq_best[i], _ = improve_extremum_chi2(gridz, min_zq[i])
+    z_best, zq_best, mod_star = _winner_redshifts(
+        indmin, z_lib, nummod, np.asarray(tensors.gridz, dtype=np.float64), min_zg, min_zq, z_interp
+    )
 
     out = {
         "Z_BEST": z_best,
@@ -234,30 +281,9 @@ def bestfit_ancil_from_type_mins(
     else:
         nummod = np.asarray(nummod, dtype=np.int32)
 
-    z_best = np.full(n_obj, INVALID_Z, dtype=np.float64)
-    zq_best = np.full(n_obj, INVALID_Z, dtype=np.float64)
-    mod_star = np.full(n_obj, float(INVALID_INDEX), dtype=np.float64)
-
-    for i in range(n_obj):
-        if indmin[i, 0] >= 0:
-            z_best[i] = z_lib[indmin[i, 0]]
-        if indmin[i, 1] >= 0:
-            zq_best[i] = z_lib[indmin[i, 1]]
-        if indmin[i, 2] >= 0:
-            mod_star[i] = float(nummod[indmin[i, 2]])
-
-    if z_interp:
-        gridz = np.asarray(tensors.gridz, dtype=np.float64)
-        if min_zg is not None:
-            min_zg = np.asarray(min_zg, dtype=np.float64)
-            for i in range(n_obj):
-                if indmin[i, 0] >= 0 and np.min(min_zg[i]) < HIGH_CHI2:
-                    z_best[i], _ = improve_extremum_chi2(gridz, min_zg[i])
-        if min_zq is not None:
-            min_zq = np.asarray(min_zq, dtype=np.float64)
-            for i in range(n_obj):
-                if indmin[i, 1] >= 0 and np.min(min_zq[i]) < HIGH_CHI2:
-                    zq_best[i], _ = improve_extremum_chi2(gridz, min_zq[i])
+    z_best, zq_best, mod_star = _winner_redshifts(
+        indmin, z_lib, nummod, np.asarray(tensors.gridz, dtype=np.float64), min_zg, min_zq, z_interp
+    )
 
     out = {
         "Z_BEST": z_best,

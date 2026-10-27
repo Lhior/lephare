@@ -808,7 +808,80 @@ def _normalize_pdf_host(pdf: np.ndarray, dz: np.ndarray) -> np.ndarray:
     return pdf
 
 
+def _fused_obj_bytes(n_b: int, n_z: int, nbytes: int) -> int:
+    """Device bytes per object on the fused path: photometry prep (~16 band vectors),
+    per-type minima / indices, MIN_ZG, MIN_ZQ and the PDF, with 1.5x slack."""
+    return int(1.5 * (3 * n_z * nbytes + 16 * n_b * 8 + 3 * (nbytes + 8)))
+
+
 def process_template_tiles_cuda(
+    mags: np.ndarray,
+    magerrs: np.ndarray,
+    tensors: MagLibTensors,
+    context: np.ndarray | None = None,
+    offsets: np.ndarray | None = None,
+    dtype=np.float64,
+    return_ancil: bool = True,
+    tile_t: int | None = None,
+) -> tuple:
+    """:func:`_process_template_tiles_once` over VRAM-sized object chunks.
+
+    The chunk is the largest that fits ``LEPHARE_ACCEL_CHI2_MEM_FRACTION`` of free VRAM
+    (one launch for the whole batch when it fits); an out-of-memory error halves it.
+    """
+    from .gpu_util import run_with_oom_backoff, suggest_obj_chunk
+
+    mags = np.asarray(mags)
+    magerrs = np.asarray(magerrs)
+    n_obj, n_b = mags.shape
+    if n_obj == 0:
+        return _process_template_tiles_once(
+            mags, magerrs, tensors, context=context, offsets=offsets, dtype=dtype,
+            return_ancil=return_ancil,
+        )
+    n_z = len(tensors.gridz)
+    nbytes = 8 if np.dtype(dtype) == np.float64 else 4
+    chunk = suggest_obj_chunk(_fused_obj_bytes(n_b, n_z, nbytes))
+    if n_obj <= chunk:
+        chunk = max(n_obj, 1)
+    ctx = None if context is None else np.asarray(context)
+    per_obj_ctx = ctx is not None and ctx.ndim > 0 and ctx.shape[0] == n_obj
+    parts: dict = {}
+
+    def run(s, e):
+        c = ctx[s:e] if per_obj_ctx else ctx
+        res = _process_template_tiles_once(
+            mags[s:e], magerrs[s:e], tensors, context=c, offsets=offsets, dtype=dtype,
+            return_ancil=True,
+        )
+        if (s, e) == (0, n_obj):
+            parts["whole"] = res
+            return
+        pdfs, zgrid, zmode, zmean, ancil = res
+        if "pdfs" not in parts:
+            parts["pdfs"] = np.empty((n_obj, pdfs.shape[1]), dtype=pdfs.dtype)
+            parts["zmode"] = np.empty(n_obj)
+            parts["zmean"] = np.empty(n_obj)
+            parts["ancil"] = {k: np.empty((n_obj,) + np.shape(v)[1:], dtype=np.float64) for k, v in ancil.items()}
+            parts["zgrid"] = zgrid
+        parts["pdfs"][s:e] = pdfs
+        parts["zmode"][s:e] = zmode
+        parts["zmean"][s:e] = zmean
+        for k, v in ancil.items():
+            parts["ancil"][k][s:e] = v
+
+    run_with_oom_backoff(run, n_obj, chunk, min_chunk=256, tag="fused")
+    if "whole" in parts:
+        pdfs, zgrid, zmode, zmean, ancil = parts["whole"]
+    else:
+        pdfs, zgrid = parts["pdfs"], parts["zgrid"]
+        zmode, zmean, ancil = parts["zmode"], parts["zmean"], parts["ancil"]
+    if not return_ancil:
+        return pdfs, zgrid
+    return pdfs, zgrid, zmode, zmean, ancil
+
+
+def _process_template_tiles_once(
     mags: np.ndarray,
     magerrs: np.ndarray,
     tensors: MagLibTensors,
