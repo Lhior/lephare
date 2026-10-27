@@ -925,14 +925,13 @@ def _process_template_tiles_once(
 
     use_priors = bool(lib["gal_on"] or lib["qso_on"])
     tiled = _choose_tiled_launch(n_z, n_b, nbytes)
-    phys_req = None
-    phys_props = None
-    if tiled is None:
-        from .physical import fused_request
+    from .physical import fused_request
 
-        phys_req = fused_request()
-        if phys_req is not None and phys_req["tensors"] is not tensors:
-            phys_req = None
+    # the fused histograms run in the one-block-per-object pass2 (after either pass1)
+    phys_req = fused_request()
+    if phys_req is not None and phys_req["tensors"] is not tensors:
+        phys_req = None
+    phys_props = None
     if tiled is not None:
         pass1_k, pass2_k = _get_tiled_kernels(
             cp, use_priors=use_priors, n_b=n_b, real=real
@@ -997,10 +996,7 @@ def _process_template_tiles_once(
             lib["z_bin_gal"], d_cmin, out["pdf"],
             np.int32(m), np.int32(n_gal), np.int32(n_b), np.int32(n_z),
         )
-        if tiled is not None:
-            _set_max_dynamic_smem(pass2_k, smem_p2)
-            pass2_k(grid, (threads,), p2_args + (np.int32(n_oc), np.int32(ttile)), shared_mem=smem_p2)
-        elif phys_req is not None:
+        if phys_req is not None:
             from .physical import fused_pass2_phys
 
             unroll = int(n_b) if int(n_b) in _NB_UNROLL else 0
@@ -1008,6 +1004,9 @@ def _process_template_tiles_once(
                 cp, phys_req, lib, inv2, abinv, base, d_cmin, out["pdf"],
                 n_b, n_z, dtype, use_priors, threads, unroll,
             )
+        elif tiled is not None:
+            _set_max_dynamic_smem(pass2_k, smem_p2)
+            pass2_k(grid, (threads,), p2_args + (np.int32(n_oc), np.int32(ttile)), shared_mem=smem_p2)
         else:
             _set_max_dynamic_smem(pass2_k, smem_p2)
             pass2_k((m,), (threads,), p2_args, shared_mem=smem_p2)
