@@ -19,6 +19,8 @@ host.
 
 from __future__ import annotations
 
+import contextvars
+import os
 import weakref
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -731,6 +733,241 @@ def _phys_props_cuda(keys, mags, magerrs, context, offsets, busnorma, chimin_gal
     return out
 
 
+# ------------------------------------------- generatePDF fused into the CUDA fit
+
+_FUSED_PHYS = contextvars.ContextVar("rail_lephare_fused_phys", default=None)
+_FUSED_KERNELS: dict = {}
+_FUSED_TABLES: dict = {}
+
+
+class fused_galaxy_properties:
+    """Context in which the CUDA fused fit also accumulates the ``generatePDF``
+    histograms in its second pass (one GAL chi2 sweep instead of two) and returns the
+    PDF statistics (``MASS_MED`` ...) as ``_PHYS:<key>`` ancil rows flagged by
+    ``_PHYSDONE``. Disable with ``LEPHARE_ACCEL_FUSED_PHYS=0``."""
+
+    def __init__(self, keys, tensors: MagLibTensors, config: Mapping[str, Any]):
+        self.req = None
+        pdf_keys = [k for k in keys if k in PDF_KEYS]
+        if not pdf_keys or os.environ.get("LEPHARE_ACCEL_FUSED_PHYS", "1") == "0":
+            return
+        try:
+            check_supported(tensors, config)
+        except (ValueError, NotImplementedError):
+            return  # galaxy_properties raises the same error with context
+        self.req = dict(keys=pdf_keys, tensors=tensors, table=gal_phys_table(tensors, config))
+
+    def __enter__(self):
+        self._tok = _FUSED_PHYS.set(self.req)
+        return self
+
+    def __exit__(self, *exc):
+        _FUSED_PHYS.reset(self._tok)
+
+
+def fused_request():
+    return _FUSED_PHYS.get()
+
+
+def fused_extra_obj_bytes(dtype) -> int:
+    """Device bytes per object the fused histograms + statistics add to a fit chunk."""
+    acc = 8 if np.dtype(dtype) == np.float64 else 4
+    return N_HIST * (acc + 4 * 8)
+
+
+def _fused_src(real: str, acc: str, ncopy: int) -> str:
+    """``fuse_pass2_kernel`` (BAY_ZG p(z) over GAL templates) that also scatters the
+    ``phys_hist_kernel`` weights: same chi2, same ``prob``; the p(z) uses the fit's
+    MAG_ABS bounds and the histograms their own (as the two separate kernels do)."""
+
+    def lit(v) -> str:
+        return f"{float(v)!r}f" if real == "float" else f"{float(v)!r}"
+
+    def grid_args(name):
+        lo, hi, n = PHYS_PDF_GRIDS[name]
+        return f"{lit(lo)}, {lit(hi)}, {n}"
+
+    off = {k: int(v) for k, v in _PDF_OFFSET.items()}
+    exp = "expf" if real == "float" else "exp"
+    return _phys_cuda_src(real, acc, ncopy) + f"""
+extern "C" __global__
+void pass2_phys_kernel(
+    const {real}* __restrict__ flux_bt,
+    const {real}* __restrict__ invsabSq,
+    const {real}* __restrict__ abinvsabSq,
+    const {real}* __restrict__ base,
+    const {real}* __restrict__ dm_min,
+    const {real}* __restrict__ dm_max,
+    const int* __restrict__ z_bin,
+    const {real}* __restrict__ chimin_gal,
+    {real}* __restrict__ pdf,
+    int N_obj, int N_t, int N_b, int N_z,
+    const {real}* __restrict__ hdm_min,
+    const {real}* __restrict__ hdm_max,
+    const {real}* __restrict__ lgmass,
+    const {real}* __restrict__ lgsfr,
+    const {real}* __restrict__ ltir,
+    const {real}* __restrict__ mref0,
+    const int* __restrict__ ssfr_bin,
+    const int* __restrict__ age_bin,
+    const int* __restrict__ col1_bin,
+    const int* __restrict__ col2_bin,
+    {acc}* __restrict__ hist,
+    {real} dchi_max, int col_analysis
+) {{
+    int o = (int)blockIdx.x;
+    if (o >= N_obj) return;
+    const int nwarps = (int)blockDim.x / 32;
+    const int warp = (int)threadIdx.x / 32;
+    extern __shared__ unsigned char raw[];
+    {real} *s_pdf = ({real} *)raw;
+    size_t pdf_bytes = (((size_t)nwarps * N_z * sizeof({real}) + 15) / 16) * 16;
+    {acc} *s_all = ({acc} *)(raw + pdf_bytes);
+    {acc} *s_hist = s_all + (warp % {ncopy}) * {N_HIST};
+#ifdef N_B
+    const int nb = N_B;
+#else
+    const int nb = N_b;
+#endif
+    {real} r_inv2[16];
+    {real} r_abinv[16];
+#pragma unroll
+    for (int k = 0; k < 16; ++k) {{
+        if (k < nb) {{
+            r_inv2[k] = invsabSq[o * nb + k];
+            r_abinv[k] = abinvsabSq[o * nb + k];
+        }}
+    }}
+    {real} r_base = base[o];
+    {real} cmin = chimin_gal[o];
+    for (int b = (int)threadIdx.x; b < nwarps * N_z; b += (int)blockDim.x) s_pdf[b] = 0;
+    for (int b = (int)threadIdx.x; b < {ncopy} * {N_HIST}; b += (int)blockDim.x) s_all[b] = 0;
+    __syncthreads();
+
+    for (int i = (int)threadIdx.x; i < N_t; i += (int)blockDim.x) {{
+        {real} avmago = 0;
+        {real} avmagt = 0;
+#ifdef N_B
+#pragma unroll
+        for (int k = 0; k < N_B; ++k) {{
+#else
+        for (int k = 0; k < nb; ++k) {{
+#endif
+            {real} f = flux_bt[k * N_t + i];
+            avmago += f * r_abinv[k];
+            avmagt += f * f * r_inv2[k];
+        }}
+        {real} chi2 = r_base;
+        if (avmagt > 0) chi2 = r_base - (avmago * avmago) / avmagt;
+        {real} dm = (avmagt > 0) ? (avmago / avmagt) : ({real})(-999.0);
+        {real} chi2_pdf = chi2;
+        {real} chi2_h = chi2;
+#if USE_PRIORS
+        if (dm > 0 && (dm <= dm_min[i] || dm >= dm_max[i])) chi2_pdf = HIGH_CHI2;
+        if (dm > 0 && (dm <= hdm_min[i] || dm >= hdm_max[i])) chi2_h = HIGH_CHI2;
+#endif
+        if (chi2_pdf < HIGH_CHI2) {{
+            {real} dchi = chi2_pdf - cmin;
+            if (dchi < 0) dchi = 0;
+            if (dchi <= dchi_max) {{
+                int zb = z_bin[i];
+                if (zb >= 0 && zb < N_z)
+                    atomicAdd(&s_pdf[warp * N_z + zb], {exp}(({real})(-0.5) * dchi));
+            }}
+        }}
+        if (chi2_h >= HIGH_CHI2) continue;
+        {real} dchi = chi2_h - cmin;
+        if (dchi < 0) dchi = 0;
+        if (dchi > dchi_max) continue;
+        {real} prob = exp({lit(-0.5)} * dchi);
+        {real} lgdm = log10(dm);
+        {real} lm = lgmass[i];
+        if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
+            atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
+            atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
+            atomicAdd(&s_hist[ssfr_bin[i]], prob);
+            atomicAdd(&s_hist[age_bin[i]], prob);
+            if (ltir[i] >= 0)
+                atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
+        }}
+        if (col_analysis) {{
+            atomicAdd(&s_hist[col1_bin[i]], prob);
+            atomicAdd(&s_hist[col2_bin[i]], prob);
+            atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
+        }}
+    }}
+    __syncthreads();
+    for (int b = (int)threadIdx.x; b < N_z; b += (int)blockDim.x) {{
+        {real} a = 0;
+        for (int w = 0; w < nwarps; ++w) a += s_pdf[w * N_z + b];
+        pdf[o * N_z + b] = a;
+    }}
+    for (int b = (int)threadIdx.x; b < {N_HIST}; b += (int)blockDim.x) {{
+        {acc} tot = 0;
+        for (int c = 0; c < {ncopy}; ++c) tot += s_all[c * {N_HIST} + b];
+        hist[(long long)o * {N_HIST} + b] = tot;
+    }}
+}}
+"""
+
+
+def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n_b, n_z, dtype,
+                     use_priors: bool, threads: int, unroll: int):
+    """Launch :func:`_fused_src` for every object row; fills ``d_pdf`` like the fit's
+    second pass and returns the requested PDF statistics as host arrays."""
+    from .cuda_template import _set_max_dynamic_smem
+
+    dtype = np.dtype(dtype).type
+    real = "double" if dtype == np.float64 else "float"
+    acc_dtype = np.float64 if dtype == np.float64 else np.float32
+    ncopy = int(os.environ.get("LEPHARE_ACCEL_PHYS_NCOPY", "1" if dtype == np.float64 else "4"))
+    key = (real, ncopy, bool(use_priors), int(unroll))
+    if key not in _FUSED_KERNELS:
+        opts = ["-std=c++11", f"-DUSE_PRIORS={int(use_priors)}"]
+        if unroll:
+            opts.append(f"-DN_B={int(unroll)}")
+        mod = cp.RawModule(code=_fused_src(real, real, ncopy), options=tuple(opts))
+        _FUSED_KERNELS[key] = mod.get_function("pass2_phys_kernel")
+    kernel = _FUSED_KERNELS[key]
+
+    tensors, table = req["tensors"], req["table"]
+    tkey = (id(table), np.dtype(dtype).str)
+    if tkey not in _FUSED_TABLES:
+        _on, hdm_min, hdm_max = _gal_priors(tensors, table.gal_idx, dtype)
+        _FUSED_TABLES.clear()
+        _FUSED_TABLES[tkey] = (table,) + tuple(
+            cp.asarray(a, dtype=dtype)
+            for a in (hdm_min, hdm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
+        ) + tuple(
+            cp.asarray(a, dtype=np.int32)
+            for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
+        )
+    per_template = _FUSED_TABLES[tkey][1:]
+
+    n_obj = int(d_base.shape[0])
+    n_gal = int(lib["n_gal"])
+    nbytes = np.dtype(dtype).itemsize
+    nwarps = threads // 32
+    smem = ((nwarps * n_z * nbytes + 15) // 16) * 16 + ncopy * N_HIST * np.dtype(acc_dtype).itemsize
+    _set_max_dynamic_smem(kernel, smem)
+    d_hist = cp.empty((n_obj, N_HIST), dtype=acc_dtype)
+    kernel(
+        (n_obj,),
+        (threads,),
+        (
+            lib["flux_gal"], d_inv2, d_abinv, d_base,
+            lib["dm_min_gal"], lib["dm_max_gal"], lib["z_bin_gal"], d_cmin_gal, d_pdf,
+            np.int32(n_obj), np.int32(n_gal), np.int32(n_b), np.int32(n_z),
+            *per_template, d_hist,
+            dtype(_dchi_cap(dtype)), np.int32(table.col_analysis),
+        ),
+        shared_mem=smem,
+    )
+    props = pdf_properties(d_hist.astype(cp.float64), req["keys"], xp=cp)
+    del d_hist
+    return {k: cp.asnumpy(v) for k, v in props.items()}
+
+
 def phys_hist(
     backend: str,
     mags,
@@ -878,7 +1115,24 @@ def galaxy_properties(
     if any(k in PDF_KEYS for k in keys):
         table = gal_phys_table(tensors, config)
         chimin_gal = np.asarray(fit["CHI_BEST"], dtype=np.float64)
-        if backend.startswith("cuda"):
+        pdf_keys = [k for k in keys if k in PDF_KEYS]
+        done = np.asarray(fit.get("_PHYSDONE", np.zeros(len(busnorma))), dtype=np.float64) > 0.5
+        if backend.startswith("cuda") and all(f"_PHYS:{k}" in fit for k in pdf_keys) and done.any():
+            # histograms already accumulated in the fused fit; redo only the rows whose
+            # final fit changed afterwards (RM_DISCREPANT band removal)
+            for k in pdf_keys:
+                out[k] = np.asarray(fit[f"_PHYS:{k}"], dtype=np.float64).copy()
+            rows = np.flatnonzero(~done)
+            if rows.size:
+                ctx = None if context is None else np.asarray(context)
+                ctx = ctx[rows] if ctx is not None and ctx.ndim > 0 and ctx.shape[0] == len(done) else ctx
+                redo = _phys_props_cuda(
+                    pdf_keys, mags[rows], magerrs[rows], ctx, offsets, busnorma[rows],
+                    chimin_gal[rows], tensors, table, dtype,
+                )
+                for k in pdf_keys:
+                    out[k][rows] = redo[k]
+        elif backend.startswith("cuda"):
             out.update(
                 _phys_props_cuda(
                     keys, mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table, dtype

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from .gpu_util import choose_tiling_axis, suggest_chi2_chunk_size
@@ -512,9 +514,13 @@ def process_batch_cuda(
     n_obj = int(np.asarray(mags).shape[0])
     n_t = int(tensors.flux.shape[0])
     axis, size = choose_tiling_axis(n_obj, n_t, dtype=dtype)
-    # FP32 always takes the fused path: only it applies the FP32 amplitude scale
-    # (BC03 fluxes ~1e-40 underflow otherwise) and it never materializes chi2[N, Nt].
-    if axis == "template" or np.dtype(dtype) == np.float32:
+    # The fused path is the default: it never materializes chi2[N, Nt], sizes its object
+    # chunks from free VRAM with OOM backoff, and FP32 needs it (only it applies the FP32
+    # amplitude scale; BC03 fluxes ~1e-40 underflow otherwise). The materialized-chi2
+    # object path (LEPHARE_ACCEL_CUDA_PATH=object, FP64 only) needs more memory than its
+    # chunk estimate for large libraries.
+    use_object = os.environ.get("LEPHARE_ACCEL_CUDA_PATH", "fused").strip().lower() == "object"
+    if axis == "template" or np.dtype(dtype) == np.float32 or not use_object:
         from .cuda_template import process_template_tiles_cuda
 
         return process_template_tiles_cuda(

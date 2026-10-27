@@ -841,7 +841,12 @@ def process_template_tiles_cuda(
         )
     n_z = len(tensors.gridz)
     nbytes = 8 if np.dtype(dtype) == np.float64 else 4
-    chunk = suggest_obj_chunk(_fused_obj_bytes(n_b, n_z, nbytes))
+    from .physical import fused_extra_obj_bytes, fused_request
+
+    per_obj = _fused_obj_bytes(n_b, n_z, nbytes)
+    if fused_request() is not None:
+        per_obj += fused_extra_obj_bytes(dtype)
+    chunk = suggest_obj_chunk(per_obj)
     if n_obj <= chunk:
         chunk = max(n_obj, 1)
     ctx = None if context is None else np.asarray(context)
@@ -920,6 +925,14 @@ def _process_template_tiles_once(
 
     use_priors = bool(lib["gal_on"] or lib["qso_on"])
     tiled = _choose_tiled_launch(n_z, n_b, nbytes)
+    phys_req = None
+    phys_props = None
+    if tiled is None:
+        from .physical import fused_request
+
+        phys_req = fused_request()
+        if phys_req is not None and phys_req["tensors"] is not tensors:
+            phys_req = None
     if tiled is not None:
         pass1_k, pass2_k = _get_tiled_kernels(
             cp, use_priors=use_priors, n_b=n_b, real=real
@@ -938,130 +951,76 @@ def _process_template_tiles_once(
         scale = cp.asarray(lib["fp32_scale"], dtype=cp_t)
         d_ab = d_ab * scale
         d_sab = d_sab * scale
-    d_inv = cp.where(d_bus > 0, d_bus / d_sab, cp.asarray(0, dtype=cp_t))
-    d_inv2 = d_inv * d_inv
-    d_abinv = d_ab * d_inv2
-    d_base = cp.sum((d_ab * d_inv) ** 2, axis=1)
     nbul = cp.asnumpy(d_nbul)
-
-    d_chimin = cp.empty((n_obj, 3), dtype=cp_t)
-    d_indmin = cp.empty((n_obj, 3), dtype=cp.int64)
-    d_min_zg = cp.empty((n_obj, n_z), dtype=cp_t)
-    d_min_zq = cp.empty((n_obj, n_z), dtype=cp_t)
-    d_pdf = cp.empty((n_obj, n_z), dtype=cp_t)
-
     threads = _THREADS
-    if tiled is not None:
-        n_oc, ttile, smem_p1, smem_p2 = tiled
-        grid = (int((n_obj + n_oc - 1) // n_oc),)
-        _set_max_dynamic_smem(pass1_k, smem_p1)
-        _set_max_dynamic_smem(pass2_k, smem_p2)
-        pass1_k(
-            grid,
-            (threads,),
-            (
-                lib["flux_bt"],
-                d_inv2,
-                d_abinv,
-                d_base,
-                lib["types"],
-                lib["dm_min"],
-                lib["dm_max"],
-                lib["z_bin"],
-                d_chimin,
-                d_indmin,
-                d_min_zg,
-                d_min_zq,
-                np.int32(n_obj),
-                np.int32(n_t),
-                np.int32(n_b),
-                np.int32(n_z),
-                np.int32(n_oc),
-                np.int32(ttile),
-            ),
-            shared_mem=smem_p1,
-        )
-        d_chimin_gal = cp.ascontiguousarray(d_chimin[:, 0])
-        n_t2 = n_gal
-        pass2_k(
-            grid,
-            (threads,),
-            (
-                lib["flux_gal"],
-                d_inv2,
-                d_abinv,
-                d_base,
-                lib["dm_min_gal"],
-                lib["dm_max_gal"],
-                lib["z_bin_gal"],
-                d_chimin_gal,
-                d_pdf,
-                np.int32(n_obj),
-                np.int32(n_t2),
-                np.int32(n_b),
-                np.int32(n_z),
-                np.int32(n_oc),
-                np.int32(ttile),
-            ),
-            shared_mem=smem_p2,
-        )
-    else:
-        nwarps = threads // 32
-        smem_p1 = nwarps * n_z * 2 * nbytes + nwarps * 3 * nbytes + nwarps * 3 * 8
-        smem_p2 = nwarps * n_z * nbytes
-        _set_max_dynamic_smem(pass1_k, smem_p1)
-        _set_max_dynamic_smem(pass2_k, smem_p2)
-        pass1_k(
-            (n_obj,),
-            (threads,),
-            (
-                lib["flux_bt"],
-                d_inv2,
-                d_abinv,
-                d_base,
-                lib["types"],
-                lib["dm_min"],
-                lib["dm_max"],
-                lib["z_bin"],
-                d_chimin,
-                d_indmin,
-                d_min_zg,
-                d_min_zq,
-                np.int32(n_obj),
-                np.int32(n_t),
-                np.int32(n_b),
-                np.int32(n_z),
-            ),
-            shared_mem=smem_p1,
-        )
-        d_chimin_gal = cp.ascontiguousarray(d_chimin[:, 0])
-        n_t2 = n_gal
-        pass2_k(
-            (n_obj,),
-            (threads,),
-            (
-                lib["flux_gal"],
-                d_inv2,
-                d_abinv,
-                d_base,
-                lib["dm_min_gal"],
-                lib["dm_max_gal"],
-                lib["z_bin_gal"],
-                d_chimin_gal,
-                d_pdf,
-                np.int32(n_obj),
-                np.int32(n_t2),
-                np.int32(n_b),
-                np.int32(n_z),
-            ),
-            shared_mem=smem_p2,
-        )
 
-    pdfs = _normalize_pdf_host(np.asarray(cp.asnumpy(d_pdf), dtype=np.float64), lib["dz"])
-    chimin_np = np.asarray(cp.asnumpy(d_chimin), dtype=np.float64)
-    indmin_np = cp.asnumpy(d_indmin)
-    min_zg_np = np.asarray(cp.asnumpy(d_min_zg), dtype=np.float64)
-    min_zq_np = np.asarray(cp.asnumpy(d_min_zq), dtype=np.float64)
+    def launch(rows, d_bus_v, want_pdf: bool) -> dict:
+        """pass1 (+ pass2, or pass2 with the fused galaxy-property histograms) for object
+        ``rows`` (device indices; None = all) fitted with the band mask ``d_bus_v``."""
+        ab_v = d_ab if rows is None else d_ab[rows]
+        sab_v = d_sab if rows is None else d_sab[rows]
+        inv = cp.where(d_bus_v > 0, d_bus_v / sab_v, cp.asarray(0, dtype=cp_t))
+        inv2 = cp.ascontiguousarray(inv * inv)
+        abinv = cp.ascontiguousarray(ab_v * inv2)
+        base = cp.ascontiguousarray(cp.sum((ab_v * inv) ** 2, axis=1))
+        m = int(base.shape[0])
+        out = {
+            "chimin": cp.empty((m, 3), dtype=cp_t),
+            "indmin": cp.empty((m, 3), dtype=cp.int64),
+            "min_zg": cp.empty((m, n_z), dtype=cp_t),
+            "min_zq": cp.empty((m, n_z), dtype=cp_t),
+            "pdf": None,
+            "props": None,
+        }
+        p1_args = (
+            lib["flux_bt"], inv2, abinv, base, lib["types"], lib["dm_min"], lib["dm_max"],
+            lib["z_bin"], out["chimin"], out["indmin"], out["min_zg"], out["min_zq"],
+            np.int32(m), np.int32(n_t), np.int32(n_b), np.int32(n_z),
+        )
+        if tiled is not None:
+            n_oc, ttile, smem_p1, smem_p2 = tiled
+            grid = (int((m + n_oc - 1) // n_oc),)
+            _set_max_dynamic_smem(pass1_k, smem_p1)
+            pass1_k(grid, (threads,), p1_args + (np.int32(n_oc), np.int32(ttile)), shared_mem=smem_p1)
+        else:
+            nwarps = threads // 32
+            smem_p1 = nwarps * n_z * 2 * nbytes + nwarps * 3 * nbytes + nwarps * 3 * 8
+            smem_p2 = nwarps * n_z * nbytes
+            _set_max_dynamic_smem(pass1_k, smem_p1)
+            pass1_k((m,), (threads,), p1_args, shared_mem=smem_p1)
+        if not want_pdf:
+            return out
+        out["pdf"] = cp.empty((m, n_z), dtype=cp_t)
+        d_cmin = cp.ascontiguousarray(out["chimin"][:, 0])
+        p2_args = (
+            lib["flux_gal"], inv2, abinv, base, lib["dm_min_gal"], lib["dm_max_gal"],
+            lib["z_bin_gal"], d_cmin, out["pdf"],
+            np.int32(m), np.int32(n_gal), np.int32(n_b), np.int32(n_z),
+        )
+        if tiled is not None:
+            _set_max_dynamic_smem(pass2_k, smem_p2)
+            pass2_k(grid, (threads,), p2_args + (np.int32(n_oc), np.int32(ttile)), shared_mem=smem_p2)
+        elif phys_req is not None:
+            from .physical import fused_pass2_phys
+
+            unroll = int(n_b) if int(n_b) in _NB_UNROLL else 0
+            out["props"] = fused_pass2_phys(
+                cp, phys_req, lib, inv2, abinv, base, d_cmin, out["pdf"],
+                n_b, n_z, dtype, use_priors, threads, unroll,
+            )
+        else:
+            _set_max_dynamic_smem(pass2_k, smem_p2)
+            pass2_k((m,), (threads,), p2_args, shared_mem=smem_p2)
+        return out
+
+    res = launch(None, d_bus, True)
+    phys_props = res["props"]
+    pdfs = _normalize_pdf_host(np.asarray(cp.asnumpy(res["pdf"]), dtype=np.float64), lib["dz"])
+    chimin_np = np.asarray(cp.asnumpy(res["chimin"]), dtype=np.float64)
+    indmin_np = cp.asnumpy(res["indmin"])
+    min_zg_np = np.asarray(cp.asnumpy(res["min_zg"]), dtype=np.float64)
+    min_zq_np = np.asarray(cp.asnumpy(res["min_zq"]), dtype=np.float64)
+    del res
 
     threshold = float(tensors.rm_discrepant)
     improved = np.min(chimin_np, axis=1)
@@ -1070,6 +1029,12 @@ def _process_template_tiles_once(
         # Throughput proxy only: skip per-object RM_DISCREPANT (would dominate).
         easy_mask = np.ones(n_obj, dtype=bool)
     hard_idxs = np.flatnonzero(~easy_mask)
+    from .gpu_util import STATS
+
+    st = STATS.setdefault("rm_discrepant", {"n_obj": 0, "n_hard": 0, "n_upper_limit": 0, "t_host_s": 0.0})
+    st["n_obj"] += int(n_obj)
+    st["n_hard"] += int(hard_idxs.size)
+    st["n_upper_limit"] += int(np.count_nonzero(nbul[hard_idxs] > 0)) if hard_idxs.size else 0
 
     ancil = empty_ancil(n_obj, n_b)
     busnorma = np.asarray(cp.asnumpy(d_bus), dtype=np.float64)
@@ -1088,75 +1053,85 @@ def _process_template_tiles_once(
             easy_idxs,
         )
 
-    if hard_idxs.size:
-        from .cuda_backend import _device_flux, _type_mins, chi2_cuda
+    ul_idxs = hard_idxs[nbul[hard_idxs] > 0] if hard_idxs.size else hard_idxs
+    disc_idxs = hard_idxs[nbul[hard_idxs] == 0] if hard_idxs.size else hard_idxs
+    if disc_idxs.size:
+        # RM_DISCREPANT, batched: each round fits every (object, one band removed) trial
+        # in one pass1 launch; an object drops the band giving the lowest type-min chi2
+        # (first such band, strict improvement), at most twice, while above threshold.
+        bus = busnorma[disc_idxs].copy()
+        best = improved[disc_idxs].copy()
+        n_removed = np.zeros(disc_idxs.size, dtype=np.int64)
+        active = np.ones(disc_idxs.size, dtype=bool)
+        while True:
+            act = np.flatnonzero(active & (best > threshold) & (n_removed < 2))
+            if act.size == 0:
+                break
+            obj, band = np.nonzero(bus[act] == 1)  # row-major: bands ascending per object
+            if obj.size == 0:
+                break
+            trial = bus[act[obj]].copy()
+            trial[np.arange(obj.size), band] = 0.0
+            r = launch(cp.asarray(disc_idxs[act[obj]]), cp.asarray(trial, dtype=cp_t), False)
+            newmin = np.min(np.asarray(cp.asnumpy(r["chimin"]), dtype=np.float64), axis=1)
+            del r
+            starts = np.searchsorted(obj, np.arange(act.size))
+            ends = np.searchsorted(obj, np.arange(act.size), side="right")
+            for j in range(act.size):
+                if ends[j] == starts[j]:
+                    active[act[j]] = False
+                    continue
+                seg = newmin[starts[j] : ends[j]]
+                k = int(np.argmin(seg))
+                if seg[k] < best[act[j]]:
+                    bus[act[j], band[starts[j] + k]] = 0.0
+                    best[act[j]] = seg[k]
+                    n_removed[act[j]] += 1
+                else:
+                    active[act[j]] = False
+        # final fit of these objects with their remaining bands (p(z), winners, histograms)
+        r = launch(cp.asarray(disc_idxs), cp.asarray(bus, dtype=cp_t), True)
+        pdfs[disc_idxs] = _normalize_pdf_host(np.asarray(cp.asnumpy(r["pdf"]), dtype=np.float64), lib["dz"])
+        merge_ancil(
+            ancil,
+            bestfit_ancil_from_type_mins(
+                cp.asnumpy(r["indmin"]),
+                np.asarray(cp.asnumpy(r["chimin"]), dtype=np.float64),
+                tensors,
+                min_zg=np.asarray(cp.asnumpy(r["min_zg"]), dtype=np.float64),
+                min_zq=np.asarray(cp.asnumpy(r["min_zq"]), dtype=np.float64),
+                busnorma=bus,
+            ),
+            disc_idxs,
+        )
+        if phys_props is not None and r["props"] is not None:
+            for k, v in r["props"].items():
+                phys_props[k][disc_idxs] = v
+        st["n_band_removed"] = st.get("n_band_removed", 0) + int(n_removed.sum())
+        del r
 
+    if ul_idxs.size:
+        # upper-limit objects keep the host RM_DISCREPANT (rare)
         ab = cp.asnumpy(d_ab)
         sab = cp.asnumpy(d_sab)
         busul = cp.asnumpy(d_busul)
-        d_flux = _device_flux(cp, tensors.flux, dtype)
-        types = tensors.types
-        for i in hard_idxs:
+        for i in ul_idxs:
             i = int(i)
-            if int(nbul[i]) > 0:
-                c2, _, _, bus = rm_discrepant(
-                    ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
-                )
-            else:
-                bus = busnorma[i].copy()
-                c2, _ = chi2_cuda(
-                    tensors.flux,
-                    ab[i],
-                    sab[i],
-                    bus,
-                    types,
-                    tensors.mag0,
-                    tensors.z,
-                    tensors.prior_lib,
-                    tensors.funz0,
-                    dtype=dtype,
-                    d_flux=d_flux,
-                )
-                improved_i = _type_mins(c2, types)
-                nb_removed = 0
-                while improved_i > threshold and nb_removed < 2:
-                    fl_dis = -1
-                    best = improved_i
-                    best_c2 = c2
-                    for k in range(n_b):
-                        if bus[k] == 1:
-                            bus[k] = 0
-                            c2k, _ = chi2_cuda(
-                                tensors.flux,
-                                ab[i],
-                                sab[i],
-                                bus,
-                                types,
-                                tensors.mag0,
-                                tensors.z,
-                                tensors.prior_lib,
-                                tensors.funz0,
-                                dtype=dtype,
-                                d_flux=d_flux,
-                            )
-                            newmin = _type_mins(c2k, types)
-                            if best > newmin:
-                                best = newmin
-                                fl_dis = k
-                                best_c2 = c2k
-                            bus[k] = 1
-                    if fl_dis >= 0:
-                        bus[fl_dis] = 0
-                        c2 = best_c2
-                        improved_i = best
-                        nb_removed += 1
-                    else:
-                        break
+            c2, _, _, bus_i = rm_discrepant(
+                ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
+            )
             pdfs[i] = bay_zg_pdf(c2, tensors)
             merge_ancil(
-                ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=bus), np.asarray([i])
+                ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=bus_i), np.asarray([i])
             )
 
+    if phys_props is not None:
+        # rows refit by RM_DISCREPANT above have different bands: galaxy_properties redoes them
+        done = np.ones(n_obj, dtype=np.float64)
+        done[ul_idxs] = 0.0
+        ancil["_PHYSDONE"] = done
+        for k, v in phys_props.items():
+            ancil[f"_PHYS:{k}"] = np.asarray(v, dtype=np.float64)
     zgrid = lib["gridz"]
     zmode, zmean = pdf_zmode_zmean(pdfs, zgrid)
     if not return_ancil:

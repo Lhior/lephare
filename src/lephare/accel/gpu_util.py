@@ -175,7 +175,7 @@ def choose_tiling_axis(
     n_obj: int,
     n_templates: int,
     dtype=np.float64,
-    mem_fraction: float | None = None,
+    mem_fraction: float = 0.55,
 ) -> tuple[str, int]:
     """Pick ``(\"object\", chunk)`` or ``(\"template\", T)`` for FP64 χ².
 
@@ -185,7 +185,8 @@ def choose_tiling_axis(
     """
     forced_axis = os.environ.get("LEPHARE_ACCEL_TILE_AXIS", "").strip().lower()
     nbytes = 8 if np.dtype(dtype) == np.float64 else 4
-    mem_fraction = chunk_mem_fraction(mem_fraction)
+    # Deliberately conservative (not the chunk-size default): a materialized chi2[N, Nt]
+    # needs more than its 3x estimate, and the fused path covers everything else.
     free_bytes = _gpu_free_bytes()
     budget = int(free_bytes * mem_fraction)
     full_bytes = int(n_obj) * int(n_templates) * nbytes * 3
