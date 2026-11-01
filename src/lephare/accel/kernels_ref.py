@@ -80,6 +80,8 @@ def prepare_photometry(
         Shape ``[N_obj, N_b]``.
     context :
         Per-object context integers, or None to derive from finite mags.
+    tensors :
+        Template library; supplies error scaling and the global/forbidden contexts.
     offsets :
         Magnitude offsets applied as in ``adapt_mag`` (model convention).
 
@@ -329,14 +331,10 @@ def process_batch(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Process a batch of objects; returns ``pdfs[N_obj, N_z]`` and ``zgrid``."""
     tensors = tensors.astype(dtype) if dtype != np.float64 else tensors
-    ab, sab, busnorma, busul, nbul = prepare_photometry(
-        mags, magerrs, context, tensors, offsets=offsets
-    )
+    ab, sab, busnorma, busul, nbul = prepare_photometry(mags, magerrs, context, tensors, offsets=offsets)
     n_obj = ab.shape[0]
     pdfs = np.zeros((n_obj, len(tensors.gridz)), dtype=np.float64)
     for i in range(n_obj):
-        chi2, _, _, _ = rm_discrepant(
-            ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
-        )
+        chi2, _, _, _ = rm_discrepant(ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors)
         pdfs[i] = bay_zg_pdf(chi2, tensors)
     return pdfs, tensors.gridz.astype(np.float64, copy=False)

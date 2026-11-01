@@ -22,8 +22,9 @@ from __future__ import annotations
 import contextvars
 import os
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -67,9 +68,7 @@ BEST_KEYS = (
 )
 # key -> (pdf name, position in uncertaintiesBay vector: 0=median, 1/2=68% bounds)
 PDF_KEYS = {
-    f"{name}_{suffix}": (name, pos)
-    for name in _PDF_NAMES
-    for pos, suffix in enumerate(("MED", "INF", "SUP"))
+    f"{name}_{suffix}": (name, pos) for name in _PDF_NAMES for pos, suffix in enumerate(("MED", "INF", "SUP"))
 }
 ABSMAG_KEYS = ("MAG_ABS()", "EMAG_ABS()", "K_COR()", "MABS_FILT()", "MAG_MOD()")
 GALAXY_PROPERTY_KEYS = BEST_KEYS + tuple(PDF_KEYS) + ABSMAG_KEYS
@@ -477,7 +476,7 @@ def _phys_hist_jax(mags, magerrs, context, offsets, busnorma, chimin_gal, tensor
         sel = slice(o0, o1)
         npad = chunk - (o1 - o0)
 
-        def _rows(a, fill):
+        def _rows(a, fill, sel=sel, npad=npad):
             return jnp.concatenate([a[sel], jnp.full((npad,) + a.shape[1:], fill, dtype=a.dtype)])
 
         args = (_rows(inv2, 0), _rows(abinv, 0), _rows(base, 0), _rows(cmin_all, HIGH_CHI2))
@@ -582,17 +581,18 @@ void phys_hist_kernel(
         {real} lgdm = log10(dm);
         {real} lm = lgmass[i];
         if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
-            atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
-            atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
+            atomicAdd(&s_hist[{off["MASS"]} + pdf_index(lgdm + lm, {grid_args("MASS")})], prob);
+            atomicAdd(&s_hist[{off["SFR"]} + pdf_index(lgsfr[i] + lgdm, {grid_args("SFR")})], prob);
             atomicAdd(&s_hist[ssfr_bin[i]], prob);
             atomicAdd(&s_hist[age_bin[i]], prob);
             if (ltir[i] >= 0)
-                atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
+                atomicAdd(&s_hist[{off["LDUST"]} + pdf_index(ltir[i] + lgdm, {grid_args("LDUST")})], prob);
         }}
         if (col_analysis) {{
             atomicAdd(&s_hist[col1_bin[i]], prob);
             atomicAdd(&s_hist[col2_bin[i]], prob);
-            atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
+            atomicAdd(&s_hist[{off["MREF"]}
+                + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args("MREF")})], prob);
         }}
     }}
     __syncthreads();
@@ -639,8 +639,7 @@ def _phys_cuda_chunks(mags, magerrs, context, offsets, busnorma, chimin_gal, ten
         cp.asarray(a, dtype=dtype)
         for a in (dm_min, dm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
     ) + tuple(
-        cp.asarray(a, dtype=np.int32)
-        for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
+        cp.asarray(a, dtype=np.int32) for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
     )
     ctx = None if context is None else np.asarray(context)
     per_obj_ctx = ctx is not None and ctx.ndim > 0 and ctx.shape[0] == n_obj
@@ -740,7 +739,7 @@ _FUSED_KERNELS: dict = {}
 _FUSED_TABLES: dict = {}
 
 
-class fused_galaxy_properties:
+class fused_galaxy_properties:  # noqa: N801 - used like a function: ``with fused_galaxy_properties(...)``
     """Context in which the CUDA fused fit also accumulates the ``generatePDF``
     histograms in its second pass (one GAL chi2 sweep instead of two) and returns the
     PDF statistics (``MASS_MED`` ...) as ``_PHYS:<key>`` ancil rows flagged by
@@ -799,24 +798,26 @@ __device__ __forceinline__ void phys_scatter(
     {real} lgdm = log10(dm);
     {real} lm = lgmass[i];
     if (lgdm > {lit(-100)} && lm > {lit(-100)}) {{
-        atomicAdd(&s_hist[{off['MASS']} + pdf_index(lgdm + lm, {grid_args('MASS')})], prob);
-        atomicAdd(&s_hist[{off['SFR']} + pdf_index(lgsfr[i] + lgdm, {grid_args('SFR')})], prob);
+        atomicAdd(&s_hist[{off["MASS"]} + pdf_index(lgdm + lm, {grid_args("MASS")})], prob);
+        atomicAdd(&s_hist[{off["SFR"]} + pdf_index(lgsfr[i] + lgdm, {grid_args("SFR")})], prob);
         atomicAdd(&s_hist[ssfr_bin[i]], prob);
         atomicAdd(&s_hist[age_bin[i]], prob);
         if (ltir[i] >= 0)
-            atomicAdd(&s_hist[{off['LDUST']} + pdf_index(ltir[i] + lgdm, {grid_args('LDUST')})], prob);
+            atomicAdd(&s_hist[{off["LDUST"]} + pdf_index(ltir[i] + lgdm, {grid_args("LDUST")})], prob);
     }}
     if (col_analysis) {{
         atomicAdd(&s_hist[col1_bin[i]], prob);
         atomicAdd(&s_hist[col2_bin[i]], prob);
-        atomicAdd(&s_hist[{off['MREF']} + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args('MREF')})], prob);
+        atomicAdd(&s_hist[{off["MREF"]}
+            + pdf_index(mref0[i] - {lit(2.5)} * lgdm, {grid_args("MREF")})], prob);
     }}
 }}
 """
 
 
-def _fused_src(real: str, acc: str, ncopy: int, npdf: int = 0, ilp: int = 1, min_blocks: int = 0,
-               threads: int = 256) -> str:
+def _fused_src(
+    real: str, acc: str, ncopy: int, npdf: int = 0, ilp: int = 1, min_blocks: int = 0, threads: int = 256
+) -> str:
     """``fuse_pass2_kernel`` (BAY_ZG p(z) over GAL templates) that also scatters the
     ``phys_hist_kernel`` weights: same chi2, same ``prob``; the p(z) uses the fit's
     MAG_ABS bounds and the histograms their own (as the two separate kernels do).
@@ -831,7 +832,10 @@ def _fused_src(real: str, acc: str, ncopy: int, npdf: int = 0, ilp: int = 1, min
     exp = "expf" if real == "float" else "exp"
     bounds = f"__launch_bounds__({int(threads)}, {int(min_blocks)})" if min_blocks else ""
     pdf_copies = "nwarps" if npdf <= 0 else str(int(npdf))
-    return _phys_cuda_src(real, acc, ncopy) + _phys_scatter_src(real, acc) + f"""
+    return (
+        _phys_cuda_src(real, acc, ncopy)
+        + _phys_scatter_src(real, acc)
+        + f"""
 #define ILP {int(ilp)}
 extern "C" __global__ {bounds}
 void pass2_phys_kernel(
@@ -956,10 +960,25 @@ void pass2_phys_kernel(
     }}
 }}
 """
+    )
 
 
-def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n_b, n_z, dtype,
-                     use_priors: bool, threads: int, unroll: int):
+def fused_pass2_phys(
+    cp,
+    req,
+    lib,
+    d_inv2,
+    d_abinv,
+    d_base,
+    d_cmin_gal,
+    d_pdf,
+    n_b,
+    n_z,
+    dtype,
+    use_priors: bool,
+    threads: int,
+    unroll: int,
+):
     """Launch :func:`_fused_src` for every object row; fills ``d_pdf`` like the fit's
     second pass and returns the requested PDF statistics as host arrays."""
     from .cuda_template import _set_max_dynamic_smem
@@ -991,12 +1010,16 @@ def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n
     if tkey not in _FUSED_TABLES:
         _on, hdm_min, hdm_max = _gal_priors(tensors, table.gal_idx, dtype)
         _FUSED_TABLES.clear()
-        _FUSED_TABLES[tkey] = (table,) + tuple(
-            cp.asarray(a, dtype=dtype)
-            for a in (hdm_min, hdm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
-        ) + tuple(
-            cp.asarray(a, dtype=np.int32)
-            for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
+        _FUSED_TABLES[tkey] = (
+            (table,)
+            + tuple(
+                cp.asarray(a, dtype=dtype)
+                for a in (hdm_min, hdm_max, table.lgmass, table.lgsfr, table.ltir, table.mref0)
+            )
+            + tuple(
+                cp.asarray(a, dtype=np.int32)
+                for a in (table.ssfr_bin, table.age_bin, table.col1_bin, table.col2_bin)
+            )
         )
     per_template = _FUSED_TABLES[tkey][1:]
 
@@ -1010,11 +1033,23 @@ def fused_pass2_phys(cp, req, lib, d_inv2, d_abinv, d_base, d_cmin_gal, d_pdf, n
         (n_obj,),
         (threads,),
         (
-            lib["flux_gal"], d_inv2, d_abinv, d_base,
-            lib["dm_min_gal"], lib["dm_max_gal"], lib["z_bin_gal"], d_cmin_gal, d_pdf,
-            np.int32(n_obj), np.int32(n_gal), np.int32(n_b), np.int32(n_z),
-            *per_template, d_hist,
-            dtype(_dchi_cap(dtype)), np.int32(table.col_analysis),
+            lib["flux_gal"],
+            d_inv2,
+            d_abinv,
+            d_base,
+            lib["dm_min_gal"],
+            lib["dm_max_gal"],
+            lib["z_bin_gal"],
+            d_cmin_gal,
+            d_pdf,
+            np.int32(n_obj),
+            np.int32(n_gal),
+            np.int32(n_b),
+            np.int32(n_z),
+            *per_template,
+            d_hist,
+            dtype(_dchi_cap(dtype)),
+            np.int32(table.col_analysis),
         ),
         shared_mem=smem,
     )
@@ -1092,8 +1127,11 @@ def best_fit_properties(valid, dmmin, indmin_gal, tensors) -> dict[str, np.ndarr
     sfr = np.asarray(tensors.sfr, dtype=np.float64)[idx]
     age = np.asarray(tensors.age, dtype=np.float64)[idx]
     has_mass = ok & (mass > 0)
-    lum = {"LUM_NUV_BEST": (tensors.luv, 400.0, 2300.0), "LUM_R_BEST": (tensors.lopt, 1000.0, 6000.0),
-           "LUM_K_BEST": (tensors.lnir, 2000.0, 22000.0)}
+    lum = {
+        "LUM_NUV_BEST": (tensors.luv, 400.0, 2300.0),
+        "LUM_R_BEST": (tensors.lopt, 1000.0, 6000.0),
+        "LUM_K_BEST": (tensors.lnir, 2000.0, 22000.0),
+    }
     with np.errstate(divide="ignore", invalid="ignore"):
         out["MASS_BEST"] = np.where(has_mass, np.log10(mass * dm), INVALID_PHYS)
         out["SFR_BEST"] = np.where(has_mass, np.log10(sfr * dm), INVALID_PHYS)
@@ -1182,8 +1220,16 @@ def galaxy_properties(
                 ctx = None if context is None else np.asarray(context)
                 ctx = ctx[rows] if ctx is not None and ctx.ndim > 0 and ctx.shape[0] == len(done) else ctx
                 redo = _phys_props_cuda(
-                    pdf_keys, mags[rows], magerrs[rows], ctx, offsets, busnorma[rows],
-                    chimin_gal[rows], tensors, table, dtype,
+                    pdf_keys,
+                    mags[rows],
+                    magerrs[rows],
+                    ctx,
+                    offsets,
+                    busnorma[rows],
+                    chimin_gal[rows],
+                    tensors,
+                    table,
+                    dtype,
                 )
                 for k in pdf_keys:
                     out[k][rows] = redo[k]
@@ -1195,7 +1241,15 @@ def galaxy_properties(
             )
         else:
             hist = phys_hist(
-                backend, mags, magerrs, context, offsets, busnorma, chimin_gal, tensors, table,
+                backend,
+                mags,
+                magerrs,
+                context,
+                offsets,
+                busnorma,
+                chimin_gal,
+                tensors,
+                table,
                 dtype=dtype,
             )
             out.update(pdf_properties(hist, keys))

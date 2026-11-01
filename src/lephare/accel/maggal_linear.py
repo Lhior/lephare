@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext as _null
-from typing import Sequence
 
 import numpy as np
 
@@ -101,7 +101,6 @@ def band_weights(rest_lamb, gridz, flt, igm_rows, lmin_all, lmax_all, xp=np):
     ps = pos_sed[rs, js]
     lam_u[rs, ps] = obs[rs, js + 1]
     rf = xp.repeat(rows, nf)
-    mf = xp.tile(xp.arange(nf), nz)
     pf = pos_flt.ravel()
     lam_u[rf, pf] = xp.tile(F, nz)
     tv[rf, pf] = xp.tile(T, nz)
@@ -124,7 +123,7 @@ def band_weights(rest_lamb, gridz, flt, igm_rows, lmin_all, lmax_all, xp=np):
     lmean = (lam_f[:, 1:] + lam_f[:, :-1]) / 2
     tmean = (tv[:, 1:] + tv[:, :-1]) / 2
     tmp = tmean * dl
-    with (np.errstate(divide="ignore", invalid="ignore") if xp is np else _null()):
+    with np.errstate(divide="ignore", invalid="ignore") if xp is np else _null():
         r5 = xp.sum(xp.where(pair, tmp / xp.where(pair, lmean * lmean, 1.0), 0.0), axis=1)
     r1 = r5 * C_LIGHT_A_S
     u = xp.zeros_like(lam_u)  # r3 = sum_i tmp_i (s_i + s_{i+1}) / 2 = sum_p u_p s_p
@@ -187,7 +186,7 @@ def grids_weights(grids: Sequence[np.ndarray], setup, gridz=None, igm: bool = Tr
     else:
         res = {t: one(*t) for t in tasks}
     out = []
-    for g, L in enumerate(grids):
+    for g in range(len(grids)):
         W = xp.stack([res[(g, b)][0] for b in range(nb)], axis=1)
         r1 = _to_host(xp, xp.stack([res[(g, b)][1] for b in range(nb)], axis=1))
         invalid = _to_host(xp, xp.stack([res[(g, b)][2] for b in range(nb)], axis=1))
@@ -253,11 +252,13 @@ def em_line_basis(line_lamb: np.ndarray, nstep: int = 40) -> tuple[np.ndarray, n
         sigma[:, None] * np.sqrt(2.0 * PI)
     )
     k = np.arange(1, lamb.size - 1)
-    ins = np.concatenate([
-        lamb[k][(lamb[k] + 1.0) < lamb[k + 1]] + 0.1,
-        lamb[k][(lamb[k - 1] + 1.0) < lamb[k]] - 0.1,
-        [0.0, 1.0e7],
-    ])
+    ins = np.concatenate(
+        [
+            lamb[k][(lamb[k] + 1.0) < lamb[k + 1]] + 0.1,
+            lamb[k][(lamb[k - 1] + 1.0) < lamb[k]] - 0.1,
+            [0.0, 1.0e7],
+        ]
+    )
     lamb_all = np.concatenate([lamb, ins])
     order = np.argsort(lamb_all, kind="mergesort")
     basis_all = np.concatenate([basis, np.zeros((ll.size, ins.size))], axis=1)[:, order]
@@ -279,12 +280,16 @@ def em_line_fluxes_linear(line_vals: Sequence[tuple[np.ndarray, np.ndarray]], se
     bases = [em_line_basis(np.frombuffer(k, dtype=np.float64)) for k in keys]
     wxp = _weights_xp(xp)
     weights = grids_weights([el for el, _ in bases], setup, xp=wxp)
-    for key, (el, basis), (W, arean, invalid) in zip(keys, bases, weights):
+    for key, (_el, basis), (W, arean, invalid) in zip(keys, bases, weights):
         members = groups[key]
         G = wxp.einsum("kbp,jp->kbj", W, wxp.asarray(basis))  # unit-luminosity line fluxes
-        lv = np.stack([np.asarray(line_vals[c][1], dtype=np.float64)[np.asarray(line_vals[c][1]) > 0] for c in members])
+        lv = np.stack(
+            [np.asarray(line_vals[c][1], dtype=np.float64)[np.asarray(line_vals[c][1]) > 0] for c in members]
+        )
         nz, nb, nl = G.shape
-        fmel = _matmul(xp, lv, (_to_host(wxp, G) if wxp is not xp else G).reshape(nz * nb, nl).T).reshape(len(members), nz, nb)
+        fmel = _matmul(xp, lv, (_to_host(wxp, G) if wxp is not xp else G).reshape(nz * nb, nl).T).reshape(
+            len(members), nz, nb
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
             val = fmel / arean[None] * scale[None, :, None]
         val = np.where((fmel > 0) & (arean[None] > 0) & ~invalid[None], val, 0.0)
@@ -302,7 +307,9 @@ def star_mags_linear(spectra, setup, xp=np) -> np.ndarray:
         groups[np.asarray(sp.lamb, dtype=np.float64).tobytes()].append(i)
     keys = list(groups)
     fcorr = np.asarray([float(f.fcorr) for f in setup.filters])
-    weights = grids_weights([np.frombuffer(k, dtype=np.float64) for k in keys], setup, gridz=[0.0], igm=False, xp=_weights_xp(xp))
+    weights = grids_weights(
+        [np.frombuffer(k, dtype=np.float64) for k in keys], setup, gridz=[0.0], igm=False, xp=_weights_xp(xp)
+    )
     for key, (W, r1, invalid) in zip(keys, weights):
         mem = np.asarray(groups[key])
         S = np.stack([np.asarray(spectra[i].flux, dtype=np.float64) for i in mem])

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 DEFAULT_MEM_FRACTION = 0.8
 
 # Last object-chunk sizes / OOM retries, for benchmarks (``gpu_util.STATS``).
@@ -231,14 +230,18 @@ def _gpu_free_bytes() -> int:
     try:
         import subprocess
 
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.free,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-        ).strip().splitlines()[0]
+        out = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.free,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+            )
+            .strip()
+            .splitlines()[0]
+        )
         free_mib, total_mib = [float(x.strip()) for x in out.split(",")]
         free_b = int(free_mib * 1024 * 1024)
         total_b = int(total_mib * 1024 * 1024)

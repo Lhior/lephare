@@ -42,9 +42,7 @@ def _require_cupy():
     try:
         import cupy as cp
     except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "backend requires CuPy. Install with: pip install 'lephare[cuda]'"
-        ) from exc
+        raise ImportError("backend requires CuPy. Install with: pip install 'lephare[cuda]'") from exc
     return cp
 
 
@@ -137,11 +135,11 @@ def _fuse_kernels_src(real: str = "double") -> str:
         raise ValueError(real)
     high = f"{HIGH_CHI2:.1f}"
     if real == "float":
-        log10, exp, fmax, tiny, lit0 = "log10f", "expf", "fmaxf", "1e-30f", "0.0f"
+        exp, lit0 = "expf", "0.0f"
         dchi_max = "80.0f"
         atomic_min = _ATOMIC_MIN_SRC["float"]
     else:
-        log10, exp, fmax, tiny, lit0 = "log10", "exp", "fmax", "1e-300", "0.0"
+        exp, lit0 = "exp", "0.0"
         dchi_max = "700.0"
         atomic_min = _ATOMIC_MIN_SRC["double"]
     return f"""
@@ -735,9 +733,7 @@ def _set_max_dynamic_smem(kernel, nbytes: int) -> None:
             int(nbytes),
         )
     except Exception as exc:
-        raise RuntimeError(
-            f"failed to raise dynamic shared memory to {nbytes} bytes"
-        ) from exc
+        raise RuntimeError(f"failed to raise dynamic shared memory to {nbytes} bytes") from exc
 
 
 def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
@@ -762,9 +758,7 @@ def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
         mag0_gal = mag0[gal]
         z_gal = z_lib[gal]
         z_bin_gal = z_bin[gal]
-        dm_min, dm_max = _mag_abs_dm_bounds(
-            mag0, z_lib, types, prior, tensors.funz0, dtype
-        )
+        dm_min, dm_max = _mag_abs_dm_bounds(mag0, z_lib, types, prior, tensors.funz0, dtype)
         return {
             "flux_bt": cp.asarray(flux_bt),
             "types": cp.asarray(types),
@@ -787,9 +781,7 @@ def _device_lib(cp, tensors: MagLibTensors, dtype=np.float64):
             "n_t": int(flux.shape[0]),
             "n_b": int(flux.shape[1]),
             "n_z": int(np.asarray(tensors.gridz).size),
-            "dz": np.asarray(
-                np.diff(np.asarray(tensors.gridz, dtype=np.float64)), dtype=np.float64
-            ),
+            "dz": np.asarray(np.diff(np.asarray(tensors.gridz, dtype=np.float64)), dtype=np.float64),
             "gridz": np.asarray(tensors.gridz, dtype=np.float64),
             "dtype": dtype,
             "fp32_scale": fp32_scale,
@@ -836,7 +828,12 @@ def process_template_tiles_cuda(
     n_obj, n_b = mags.shape
     if n_obj == 0:
         return _process_template_tiles_once(
-            mags, magerrs, tensors, context=context, offsets=offsets, dtype=dtype,
+            mags,
+            magerrs,
+            tensors,
+            context=context,
+            offsets=offsets,
+            dtype=dtype,
             return_ancil=return_ancil,
         )
     n_z = len(tensors.gridz)
@@ -856,7 +853,12 @@ def process_template_tiles_cuda(
     def run(s, e):
         c = ctx[s:e] if per_obj_ctx else ctx
         res = _process_template_tiles_once(
-            mags[s:e], magerrs[s:e], tensors, context=c, offsets=offsets, dtype=dtype,
+            mags[s:e],
+            magerrs[s:e],
+            tensors,
+            context=c,
+            offsets=offsets,
+            dtype=dtype,
             return_ancil=True,
         )
         if (s, e) == (0, n_obj):
@@ -867,7 +869,9 @@ def process_template_tiles_cuda(
             parts["pdfs"] = np.empty((n_obj, pdfs.shape[1]), dtype=pdfs.dtype)
             parts["zmode"] = np.empty(n_obj)
             parts["zmean"] = np.empty(n_obj)
-            parts["ancil"] = {k: np.empty((n_obj,) + np.shape(v)[1:], dtype=np.float64) for k, v in ancil.items()}
+            parts["ancil"] = {
+                k: np.empty((n_obj,) + np.shape(v)[1:], dtype=np.float64) for k, v in ancil.items()
+            }
             parts["zgrid"] = zgrid
         parts["pdfs"][s:e] = pdfs
         parts["zmode"][s:e] = zmode
@@ -933,13 +937,9 @@ def _process_template_tiles_once(
         phys_req = None
     phys_props = None
     if tiled is not None:
-        pass1_k, pass2_k = _get_tiled_kernels(
-            cp, use_priors=use_priors, n_b=n_b, real=real
-        )
+        pass1_k, pass2_k = _get_tiled_kernels(cp, use_priors=use_priors, n_b=n_b, real=real)
     else:
-        pass1_k, pass2_k = _get_fuse_kernels(
-            cp, use_priors=use_priors, n_b=n_b, real=real
-        )
+        pass1_k, pass2_k = _get_fuse_kernels(cp, use_priors=use_priors, n_b=n_b, real=real)
 
     from .cuda_backend import prepare_photometry_cuda_device
 
@@ -972,9 +972,22 @@ def _process_template_tiles_once(
             "props": None,
         }
         p1_args = (
-            lib["flux_bt"], inv2, abinv, base, lib["types"], lib["dm_min"], lib["dm_max"],
-            lib["z_bin"], out["chimin"], out["indmin"], out["min_zg"], out["min_zq"],
-            np.int32(m), np.int32(n_t), np.int32(n_b), np.int32(n_z),
+            lib["flux_bt"],
+            inv2,
+            abinv,
+            base,
+            lib["types"],
+            lib["dm_min"],
+            lib["dm_max"],
+            lib["z_bin"],
+            out["chimin"],
+            out["indmin"],
+            out["min_zg"],
+            out["min_zq"],
+            np.int32(m),
+            np.int32(n_t),
+            np.int32(n_b),
+            np.int32(n_z),
         )
         if tiled is not None:
             n_oc, ttile, smem_p1, smem_p2 = tiled
@@ -992,17 +1005,39 @@ def _process_template_tiles_once(
         out["pdf"] = cp.empty((m, n_z), dtype=cp_t)
         d_cmin = cp.ascontiguousarray(out["chimin"][:, 0])
         p2_args = (
-            lib["flux_gal"], inv2, abinv, base, lib["dm_min_gal"], lib["dm_max_gal"],
-            lib["z_bin_gal"], d_cmin, out["pdf"],
-            np.int32(m), np.int32(n_gal), np.int32(n_b), np.int32(n_z),
+            lib["flux_gal"],
+            inv2,
+            abinv,
+            base,
+            lib["dm_min_gal"],
+            lib["dm_max_gal"],
+            lib["z_bin_gal"],
+            d_cmin,
+            out["pdf"],
+            np.int32(m),
+            np.int32(n_gal),
+            np.int32(n_b),
+            np.int32(n_z),
         )
         if phys_req is not None:
             from .physical import fused_pass2_phys
 
             unroll = int(n_b) if int(n_b) in _NB_UNROLL else 0
             out["props"] = fused_pass2_phys(
-                cp, phys_req, lib, inv2, abinv, base, d_cmin, out["pdf"],
-                n_b, n_z, dtype, use_priors, threads, unroll,
+                cp,
+                phys_req,
+                lib,
+                inv2,
+                abinv,
+                base,
+                d_cmin,
+                out["pdf"],
+                n_b,
+                n_z,
+                dtype,
+                use_priors,
+                threads,
+                unroll,
             )
         elif tiled is not None:
             _set_max_dynamic_smem(pass2_k, smem_p2)
@@ -1116,13 +1151,9 @@ def _process_template_tiles_once(
         busul = cp.asnumpy(d_busul)
         for i in ul_idxs:
             i = int(i)
-            c2, _, _, bus_i = rm_discrepant(
-                ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
-            )
+            c2, _, _, bus_i = rm_discrepant(ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors)
             pdfs[i] = bay_zg_pdf(c2, tensors)
-            merge_ancil(
-                ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=bus_i), np.asarray([i])
-            )
+            merge_ancil(ancil, bestfit_ancil_from_chi2(c2, tensors, busnorma=bus_i), np.asarray([i]))
 
     if phys_props is not None:
         # rows refit by RM_DISCREPANT above have different bands: galaxy_properties redoes them

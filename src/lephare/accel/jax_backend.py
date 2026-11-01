@@ -35,9 +35,7 @@ def _require_jax():
         import jax
         import jax.numpy as jnp
     except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "backend requires JAX. Install with: pip install 'lephare[jax]'"
-        ) from exc
+        raise ImportError("backend requires JAX. Install with: pip install 'lephare[jax]'") from exc
     os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
     flag = os.environ.get("JAX_ENABLE_X64", "1").strip().lower()
     jax.config.update("jax_enable_x64", flag not in ("0", "false", "no"))
@@ -147,8 +145,6 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
     types = jnp.asarray(tensors.types)
     mag0 = jnp.asarray(tensors.mag0, dtype=jd)
     z_lib = jnp.asarray(tensors.z, dtype=jd)
-    prior = jnp.asarray(tensors.prior_lib, dtype=jd)
-    funz0 = jnp.asarray(tensors.funz0, dtype=jd)
     err_scale = jnp.asarray(tensors.err_scale, dtype=jd)
     err_factor = jnp.asarray(tensors.err_factor, dtype=jd)
     gbcont = int(tensors.gbcont)
@@ -173,9 +169,7 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         z_bin_full_np = np.zeros(n_t, dtype=np.int64)
     else:
         inv = 1.0 / (gridz_np[1] - gridz_np[0])
-        z_bin_full_np = np.clip(
-            np.rint((z_np - gridz_np[0]) * inv).astype(np.int64), 0, n_z - 1
-        )
+        z_bin_full_np = np.clip(np.rint((z_np - gridz_np[0]) * inv).astype(np.int64), 0, n_z - 1)
     z_bin_full = jnp.asarray(z_bin_full_np)
 
     # Packed GAL columns for pass-2 (STAR/QSO unused in BAY_ZG)
@@ -320,7 +314,15 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         ctx = context if has_context else None
         off = offsets_arr if has_offsets else None
         ab, sab, busnorma, busul, nbul = _prepare_photometry_arrays(
-            mags, magerrs, ctx, off, err_scale, err_factor, gbcont, contforb, jnp,
+            mags,
+            magerrs,
+            ctx,
+            off,
+            err_scale,
+            err_factor,
+            gbcont,
+            contforb,
+            jnp,
             flux_scale=amp_scale,
         )
         chi2 = fit_batch_chi2(ab, sab, busnorma)
@@ -334,7 +336,15 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         ctx = context if has_context else None
         off = offsets_arr if has_offsets else None
         return _prepare_photometry_arrays(
-            mags, magerrs, ctx, off, err_scale, err_factor, gbcont, contforb, jnp,
+            mags,
+            magerrs,
+            ctx,
+            off,
+            err_scale,
+            err_factor,
+            gbcont,
+            contforb,
+            jnp,
             flux_scale=amp_scale,
         )
 
@@ -350,9 +360,7 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
             cmin = vals[rows, loc]
             better = cmin < chimin[:, t]
             chimin = chimin.at[:, t].set(jnp.where(better, cmin, chimin[:, t]))
-            indmin = indmin.at[:, t].set(
-                jnp.where(better, loc.astype(indmin.dtype) + offset, indmin[:, t])
-            )
+            indmin = indmin.at[:, t].set(jnp.where(better, loc.astype(indmin.dtype) + offset, indmin[:, t]))
             return chimin, indmin
 
         for t in range(3):
@@ -360,9 +368,7 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
 
         # O(N*T) scatter-min into z bins (not O(Nz*N*T) masked reductions)
         def _scatter_min_rows(vals):
-            return jax.vmap(
-                lambda row: jnp.full(n_z, HIGH_CHI2, dtype=jd).at[z_bin_t].min(row)
-            )(vals)
+            return jax.vmap(lambda row: jnp.full(n_z, HIGH_CHI2, dtype=jd).at[z_bin_t].min(row))(vals)
 
         gal_vals = jnp.where(types_t[None, :] == 0, chi2, HIGH_CHI2)
         qso_vals = jnp.where(types_t[None, :] == 1, chi2, HIGH_CHI2)
@@ -398,19 +404,13 @@ def _build_fit_fns(tensors: MagLibTensors, dtype, jax, jnp):
         min_zg,
         min_zq,
     ):
-        chi2 = chi2_template_tile(
-            ab, sab, busnorma, flux_t, flux_sq_t, types_t, dm_min_t, dm_max_t
-        )
-        return pass1_update(
-            chi2, types_t, z_bin_t, offset, chimin, indmin, min_zg, min_zq
-        )
+        chi2 = chi2_template_tile(ab, sab, busnorma, flux_t, flux_sq_t, types_t, dm_min_t, dm_max_t)
+        return pass1_update(chi2, types_t, z_bin_t, offset, chimin, indmin, min_zg, min_zq)
 
     def fused_pass2_tile(
         ab, sab, busnorma, flux_t, flux_sq_t, types_t, dm_min_t, dm_max_t, z_bin_t, chimin_gal, pdf
     ):
-        chi2 = chi2_template_tile(
-            ab, sab, busnorma, flux_t, flux_sq_t, types_t, dm_min_t, dm_max_t
-        )
+        chi2 = chi2_template_tile(ab, sab, busnorma, flux_t, flux_sq_t, types_t, dm_min_t, dm_max_t)
         return pass2_accumulate(chi2, types_t, z_bin_t, chimin_gal, pdf)
 
     fit_one_jit = jax.jit(fit_one)
@@ -669,12 +669,8 @@ def _finish_hard_rows(
 
     for row in ul_rows:
         i = int(idxs[row])
-        c2, _, _, bus = rm_discrepant(
-            ab[row], sab[row], busnorma[row], busul[row], int(nbul[row]), tensors
-        )
-        pdfs[i] = np.asarray(
-            jax.device_get(pdf_fn(jnp.asarray(c2[None, :], dtype=dtype)))
-        )[0]
+        c2, _, _, bus = rm_discrepant(ab[row], sab[row], busnorma[row], busul[row], int(nbul[row]), tensors)
+        pdfs[i] = np.asarray(jax.device_get(pdf_fn(jnp.asarray(c2[None, :], dtype=dtype))))[0]
         chi2_by_local[int(row)] = np.asarray(c2, dtype=np.float64)
         bus_by_local[int(row)] = bus
 
@@ -732,9 +728,7 @@ def _finish_hard_rows(
                         chi2_final[t] = c2_best
 
             c2_stack = np.stack(chi2_final, axis=0)
-            pdf_hard = np.asarray(
-                jax.device_get(pdf_fn(jnp.asarray(c2_stack, dtype=dtype)))
-            )
+            pdf_hard = np.asarray(jax.device_get(pdf_fn(jnp.asarray(c2_stack, dtype=dtype))))
             for t, row in enumerate(rows):
                 i = int(idxs[row])
                 pdfs[i] = pdf_hard[t]
@@ -782,16 +776,8 @@ def _process_template_tiles(
 
     has_c = context is not None
     has_o = offsets is not None
-    ctx_full = (
-        np.asarray(context, dtype=np.int64)
-        if has_c
-        else np.zeros(n_obj, dtype=np.int64)
-    )
-    off_arr = (
-        np.asarray(offsets, dtype=dtype)
-        if has_o
-        else np.zeros(n_b, dtype=dtype)
-    )
+    ctx_full = np.asarray(context, dtype=np.int64) if has_c else np.zeros(n_obj, dtype=np.int64)
+    off_arr = np.asarray(offsets, dtype=dtype) if has_o else np.zeros(n_b, dtype=dtype)
 
     libs = _padded_libs(fns, tile_t)
     full, gal = libs["full"], libs["gal"]
@@ -833,9 +819,7 @@ def _process_template_tiles(
             )
         else:
             c2 = chi2_tile(ab, sab, busnorma, ft, fsq, ty, dmin, dmax)
-            chimin, indmin, min_zg, min_zq = pass1(
-                c2, ty, zb, s, chimin, indmin, min_zg, min_zq
-            )
+            chimin, indmin, min_zg, min_zq = pass1(c2, ty, zb, s, chimin, indmin, min_zg, min_zq)
 
     chimin_gal = chimin[:, 0]
     pdf = jnp.zeros((n_obj, n_z), dtype=jd)
@@ -934,16 +918,8 @@ def _process_object_tiles(
 
     has_c = context is not None
     has_o = offsets is not None
-    ctx_full = (
-        np.asarray(context, dtype=np.int64)
-        if has_c
-        else np.zeros(n_obj, dtype=np.int64)
-    )
-    off_arr = (
-        np.asarray(offsets, dtype=dtype)
-        if has_o
-        else np.zeros(n_b, dtype=dtype)
-    )
+    ctx_full = np.asarray(context, dtype=np.int64) if has_c else np.zeros(n_obj, dtype=np.int64)
+    off_arr = np.asarray(offsets, dtype=dtype) if has_o else np.zeros(n_b, dtype=dtype)
 
     def _consume_easy(start, end, dev, hard_acc):
         pdf, _zm, _zmn, easy, nbul = jax.device_get(dev)

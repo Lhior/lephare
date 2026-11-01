@@ -224,10 +224,7 @@ def zfix_type_mins(
             avmagt = (f * f) @ invsab_sq[gpu_like].T
             dm = np.where(avmagt > 0, avmago / avmagt, -999.0)
             chi2 = np.sum(
-                (
-                    s2n[gpu_like][None, :, :]
-                    - dm[:, :, None] * f[:, None, :] * invsab[gpu_like][None, :, :]
-                )
+                (s2n[gpu_like][None, :, :] - dm[:, :, None] * f[:, None, :] * invsab[gpu_like][None, :, :])
                 ** 2,
                 axis=2,
             )
@@ -238,14 +235,10 @@ def zfix_type_mins(
                 abs_mag = loc_mag0[:, None] - 2.5 * np.log10(np.clip(dm, 1e-300, None))
                 abs_mag = np.where(loc_z[:, None] < 1e-10, abs_mag - funz0, abs_mag)
                 if mabs_gal:
-                    rej = (loc_types[:, None] == 0) & (
-                        (abs_mag <= prior[0]) | (abs_mag >= prior[1])
-                    )
+                    rej = (loc_types[:, None] == 0) & ((abs_mag <= prior[0]) | (abs_mag >= prior[1]))
                     chi2 = np.where(rej, HIGH_CHI2, chi2)
                 if mabs_agn:
-                    rej = (loc_types[:, None] == 1) & (
-                        (abs_mag <= prior[2]) | (abs_mag >= prior[3])
-                    )
+                    rej = (loc_types[:, None] == 1) & ((abs_mag <= prior[2]) | (abs_mag >= prior[3]))
                     chi2 = np.where(rej, HIGH_CHI2, chi2)
             for t in range(3):
                 m = loc_types == t
@@ -286,9 +279,7 @@ def zfix_type_mins(
                 ebv=None if tensors.ebv is None else tensors.ebv[sl],
                 z_interp=tensors.z_interp,
             )
-            chi2, dm, _, _ = rm_discrepant(
-                ab[o], sab[o], busnorma[o], busul[o], int(nbul[o]), sub
-            )
+            chi2, dm, _, _ = rm_discrepant(ab[o], sab[o], busnorma[o], busul[o], int(nbul[o]), sub)
             for t in range(3):
                 m = sub.types == t
                 if not np.any(m):
@@ -357,9 +348,7 @@ def calculate_offsets(
     sys_a0 = apply_sysshift_or_none(config, n_b)
     if sys_a0 is not None:
         if auto:
-            print(
-                "Auto adapt is turned off because systematic shifts are applied manually"
-            )
+            print("Auto adapt is turned off because systematic shifts are applied manually")
         return sys_a0
     if not auto:
         return np.zeros(n_b, dtype=np.float64)
@@ -375,16 +364,12 @@ def calculate_offsets(
     zs_s = np.asarray(zs, dtype=np.float64)[mask]
     ctx = None if context is None else np.asarray(context)[mask]
 
-    ab_ori, sab, busnorma, busul, nbul = prepare_photometry(
-        mags_s, magerrs_s, ctx, tensors, offsets=None
-    )
+    ab_ori, sab, busnorma, busul, nbul = prepare_photometry(mags_s, magerrs_s, ctx, tensors, offsets=None)
     mab_ori = flux2mag(ab_ori)
     csr_off, csr_idx = build_zslice_csr(tensors)
 
     def _default_fit(ab, sab_, bus, busul_, nbul_, zs_):
-        return zfix_type_mins(
-            ab, sab_, bus, busul_, nbul_, tensors, zs_, csr_off, csr_idx
-        )
+        return zfix_type_mins(ab, sab_, bus, busul_, nbul_, tensors, zs_, csr_off, csr_idx)
 
     fit = zfix_fn or _default_fit
 

@@ -47,17 +47,13 @@ def get_backend(name: str) -> ProcessFn:
         return process_numpy
     if name in ("jax_hybrid", "jax_full"):
         if not jax_available():
-            raise ImportError(
-                f"backend={name} requires JAX. pip install 'lephare[jax]'"
-            )
+            raise ImportError(f"backend={name} requires JAX. pip install 'lephare[jax]'")
         from .jax_backend import process_batch_jax
 
         return process_batch_jax
     if name in ("cuda_hybrid", "cuda_full"):
         if not cuda_available():
-            raise ImportError(
-                f"backend={name} requires CuPy+GPU. pip install 'lephare[cuda]'"
-            )
+            raise ImportError(f"backend={name} requires CuPy+GPU. pip install 'lephare[cuda]'")
         from .cuda_backend import process_batch_cuda
 
         return process_batch_cuda

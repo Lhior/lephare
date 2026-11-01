@@ -130,9 +130,7 @@ def rebuild_maglib_device(
     star_flux = _rebuild_star_fluxes(config, filters, backend, dtype)
     n_star = int(np.sum(reference.types == 2))
     if star_flux.shape[0] != n_star:
-        raise AssertionError(
-            f"STAR rebuild size {star_flux.shape[0]} != reference {n_star}"
-        )
+        raise AssertionError(f"STAR rebuild size {star_flux.shape[0]} != reference {n_star}")
 
     gal_flux = _device_roundtrip_flux(reference.flux[reference.types == 0], backend, dtype)
     qso_flux = _device_roundtrip_flux(reference.flux[reference.types == 1], backend, dtype)
@@ -181,14 +179,10 @@ def assert_maglib_parity(
     round-trip); default rtol is documented looser than hybrid identity copies.
     """
     if reference.flux.shape != candidate.flux.shape:
-        raise AssertionError(
-            f"maglib shape mismatch: {reference.flux.shape} vs {candidate.flux.shape}"
-        )
+        raise AssertionError(f"maglib shape mismatch: {reference.flux.shape} vs {candidate.flux.shape}")
     if not np.allclose(reference.flux, candidate.flux, rtol=rtol, atol=atol):
         max_err = float(np.max(np.abs(reference.flux - candidate.flux)))
-        rel = np.abs(reference.flux - candidate.flux) / np.clip(
-            np.abs(reference.flux), 1e-300, None
-        )
+        rel = np.abs(reference.flux - candidate.flux) / np.clip(np.abs(reference.flux), 1e-300, None)
         raise AssertionError(
             f"maglib flux parity failed, max abs err={max_err}, max rel={float(np.max(rel))}"
         )

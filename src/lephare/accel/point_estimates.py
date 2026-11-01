@@ -94,7 +94,7 @@ def zbest_batched(pdf_vals, grid, xp=np, gamma: float = 0.15, xatol: float = 1e-
         xf_new = xp.where(better, x, xf)
         fx_new = xp.where(better, fu, fx)
 
-        upd = lambda new, old: xp.where(active, new, old)  # noqa: E731
+        upd = lambda new, old, active=active: xp.where(active, new, old)  # noqa: E731
         a, b = upd(a_new, a), upd(b_new, b)
         e, rat = upd(e_new, e), upd(rat_new, rat)
         fulc, ffulc = upd(fulc_new, fulc), upd(ffulc_new, ffulc)

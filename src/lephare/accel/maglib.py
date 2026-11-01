@@ -47,7 +47,7 @@ class MagLibTensors:
         """True when all per-template metadata for galaxy properties is present."""
         return all(getattr(self, f) is not None for f in PHYS_FIELDS)
 
-    def astype(self, dtype) -> "MagLibTensors":
+    def astype(self, dtype) -> MagLibTensors:
         return MagLibTensors(
             flux=self.flux.astype(dtype, copy=False),
             z=self.z.astype(dtype, copy=False),
@@ -134,9 +134,7 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
     full = photz.fullLib
     n_t = int(flux.shape[0])
     if len(full) != n_t:
-        raise RuntimeError(
-            f"PhotoZ flux rows {n_t} != fullLib size {len(full)}"
-        )
+        raise RuntimeError(f"PhotoZ flux rows {n_t} != fullLib size {len(full)}")
     n_bands = int(photz.imagm)
     types = np.empty(n_t, dtype=np.int32)
     mag0 = np.empty(n_t, dtype=np.float64)
@@ -182,14 +180,10 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
     kcorr = mag - mag[index_z0] - np.asarray(lcdm.distMod(red), dtype=np.float64)[:, None]
     mass, sfr = _gal_mass_sfr_from_lib_bin(config, types, nummod, age)
 
-    err_scale = np.asarray(
-        _parse_doubles(config, "ERR_SCALE", "0.02", n_bands), dtype=np.float64
-    )
+    err_scale = np.asarray(_parse_doubles(config, "ERR_SCALE", "0.02", n_bands), dtype=np.float64)
     if err_scale.size == 1:
         err_scale = np.full(n_bands, err_scale[0], dtype=np.float64)
-    err_factor = np.asarray(
-        _parse_doubles(config, "ERR_FACTOR", "1.5", n_bands), dtype=np.float64
-    )
+    err_factor = np.asarray(_parse_doubles(config, "ERR_FACTOR", "1.5", n_bands), dtype=np.float64)
     if err_factor.size == 1:
         err_factor = np.full(n_bands, err_factor[0], dtype=np.float64)
 
@@ -273,20 +267,10 @@ def save_maglib(tensors: MagLibTensors, path: str | Path, compressed: bool = Tru
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     nummod = (
-        tensors.nummod
-        if tensors.nummod is not None
-        else np.full(tensors.flux.shape[0], -99, dtype=np.int32)
+        tensors.nummod if tensors.nummod is not None else np.full(tensors.flux.shape[0], -99, dtype=np.int32)
     )
-    age = (
-        tensors.age
-        if tensors.age is not None
-        else np.zeros(tensors.flux.shape[0], dtype=np.float64)
-    )
-    ebv = (
-        tensors.ebv
-        if tensors.ebv is not None
-        else np.zeros(tensors.flux.shape[0], dtype=np.float64)
-    )
+    age = tensors.age if tensors.age is not None else np.zeros(tensors.flux.shape[0], dtype=np.float64)
+    ebv = tensors.ebv if tensors.ebv is not None else np.zeros(tensors.flux.shape[0], dtype=np.float64)
     (np.savez_compressed if compressed else np.savez)(
         path,
         flux=tensors.flux,
@@ -312,11 +296,7 @@ def save_maglib(tensors: MagLibTensors, path: str | Path, compressed: bool = Tru
             ],
             dtype=np.float64,
         ),
-        **{
-            f: np.asarray(getattr(tensors, f))
-            for f in PHYS_FIELDS
-            if getattr(tensors, f) is not None
-        },
+        **{f: np.asarray(getattr(tensors, f)) for f in PHYS_FIELDS if getattr(tensors, f) is not None},
     )
 
 

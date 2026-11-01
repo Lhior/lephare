@@ -24,9 +24,7 @@ def _require_cupy():
     try:
         import cupy as cp
     except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "CUDA AUTO_ADAPT requires CuPy. Install with: pip install 'lephare[cuda]'"
-        ) from exc
+        raise ImportError("CUDA AUTO_ADAPT requires CuPy. Install with: pip install 'lephare[cuda]'") from exc
     return cp
 
 

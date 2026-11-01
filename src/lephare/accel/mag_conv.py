@@ -7,9 +7,9 @@ Used by ``jax_full`` / ``cuda_full`` mag-lib builders. Numerics follow
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import numpy as np
 
@@ -120,9 +120,7 @@ def compute_fluxes(
     return ab_mag_to_flux(compute_magnitudes(sed_lamb, sed_flux, filters, dist_mod=0.0))
 
 
-def redshift_spectrum(
-    sed_lamb: np.ndarray, sed_flux: np.ndarray, z: float
-) -> tuple[np.ndarray, np.ndarray]:
+def redshift_spectrum(sed_lamb: np.ndarray, sed_flux: np.ndarray, z: float) -> tuple[np.ndarray, np.ndarray]:
     """``SED::redshift``: ``lamb*(1+z)``, ``flux/(1+z)``."""
     one_pz = 1.0 + z
     return sed_lamb * one_pz, sed_flux / one_pz

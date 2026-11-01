@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -24,10 +25,10 @@ from .mag_conv import (
     load_filters_from_config,
 )
 from .mag_physics import (
-    ExtLaw,
     HIGH_MAG,
     INVALID_MAG,
     LYA_SPLIT,
+    ExtLaw,
     OpaTable,
     apply_ext_lines,
     apply_extinction_cpp,
@@ -86,8 +87,7 @@ def maggal_setup_from_config(config: dict[str, Any]) -> MagGalSetup:
     lepharedir = os.environ.get("LEPHAREDIR", getattr(lp, "LEPHAREDIR", ""))
     ext_names = _split_list(config, "EXTINC_LAW", "calzetti.dat")
     ext_laws = [
-        load_extinction_law_file(Path(lepharedir) / "ext" / name, i)
-        for i, name in enumerate(ext_names)
+        load_extinction_law_file(Path(lepharedir) / "ext" / name, i) for i, name in enumerate(ext_names)
     ]
     mw_ext = load_extinction_law_file(Path(lepharedir) / "ext" / "MW_seaton.dat", len(ext_laws))
     ebv = np.asarray(parse_csv_floats(str(config.get("EB_V", "0"))), dtype=np.float64)
@@ -102,9 +102,7 @@ def maggal_setup_from_config(config: dict[str, Any]) -> MagGalSetup:
     if emlines[:2].upper() == "NO":
         frac_em = np.array([1.0], dtype=np.float64)
     else:
-        frac_em = np.asarray(
-            parse_csv_floats(str(config.get("EM_DISPERSION", "1"))), dtype=np.float64
-        )
+        frac_em = np.asarray(parse_csv_floats(str(config.get("EM_DISPERSION", "1"))), dtype=np.float64)
         if frac_em.size == 0:
             frac_em = np.array([1.0], dtype=np.float64)
     zstep = parse_csv_floats(str(config.get("Z_STEP", "0.04,0,6")))
@@ -213,13 +211,13 @@ def _pad_spectra(lambs: Sequence[np.ndarray], fluxes: Sequence[np.ndarray]):
     nmax = max(int(a.size) for a in lambs)
     pad_l = np.zeros((n, nmax), dtype=np.float64)
     pad_f = np.zeros((n, nmax), dtype=np.float64)
-    for i, (l, f) in enumerate(zip(lambs, fluxes)):
-        pad_l[i, : l.size] = l
+    for i, (lam, f) in enumerate(zip(lambs, fluxes)):
+        pad_l[i, : lam.size] = lam
         pad_f[i, : f.size] = f
-        if l.size < nmax:
+        if lam.size < nmax:
             # jnp.interp requires strictly increasing xp; repeating λ poisons sparse SEDs.
-            pad_l[i, l.size :] = l[-1] + np.arange(1, nmax - l.size + 1, dtype=np.float64) * 0.01
-            pad_f[i, l.size :] = 0.0
+            pad_l[i, lam.size :] = lam[-1] + np.arange(1, nmax - lam.size + 1, dtype=np.float64) * 0.01
+            pad_f[i, lam.size :] = 0.0
     return pad_l, pad_f
 
 
@@ -623,8 +621,7 @@ def maggal_one_gal(
 def _concat_maggal_blocks(chunks: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     chunks = [c for c in chunks if c["mag"].shape[0]]
     if not chunks:
-        n_b = chunks[0]["mag"].shape[1] if chunks else 0
-        return chunks[0] if False else {
+        return {
             "mag": np.zeros((0, 1)),
             "flux": np.zeros((0, 1)),
             "z": np.zeros(0),
@@ -668,16 +665,12 @@ def maggal_gal_library(
             for ebv in setup.ebv:
                 if not _ext_applies(spec.nummod, i, float(ebv), setup.modext):
                     continue
-                lamb_e, flux_e = apply_extinction_cpp(
-                    spec.lamb, spec.flux, float(ebv), setup.ext_laws[i]
-                )
+                lamb_e, flux_e = apply_extinction_cpp(spec.lamb, spec.flux, float(ebv), setup.ext_laws[i])
                 ltir_z = _dust_ltir(spec, flux_e, setup)
                 for frac in setup.frac_em:
                     rest_l.append(lamb_e)
                     rest_f.append(flux_e)
-                    recs.append(
-                        (spec, float(ebv), float(frac), int(setup.ext_laws[i].numext), ltir_z)
-                    )
+                    recs.append((spec, float(ebv), float(frac), int(setup.ext_laws[i].numext), ltir_z))
     if not rest_l:
         return maggal_one_gal(spectra[0], setup, integrator="jax", em_lines=em_lines)
     pad_l, pad_f = _pad_spectra(rest_l, rest_f)
@@ -749,9 +742,7 @@ def maggal_qso_library(
     if integrator == "linear":
         return _maggal_qso_linear(spectra, setup, xp)
     if integrator != "jax":
-        return _concat_maggal_blocks(
-            [maggal_one_qso(s, setup, integrator=integrator) for s in spectra]
-        )
+        return _concat_maggal_blocks([maggal_one_qso(s, setup, integrator=integrator) for s in spectra])
     n_z = int(setup.gridz.size)
     rest_l, rest_f, recs = [], [], []
     for spec in spectra:
@@ -759,9 +750,7 @@ def maggal_qso_library(
             for ebv in setup.ebv:
                 if not _ext_applies(spec.nummod, i, float(ebv), setup.modext):
                     continue
-                lamb_e, flux_e = apply_extinction_cpp(
-                    spec.lamb, spec.flux, float(ebv), setup.ext_laws[i]
-                )
+                lamb_e, flux_e = apply_extinction_cpp(spec.lamb, spec.flux, float(ebv), setup.ext_laws[i])
                 rest_l.append(lamb_e)
                 rest_f.append(flux_e)
                 recs.append((spec, float(ebv)))
@@ -785,9 +774,7 @@ def maggal_qso_library(
             rows_num.append(int(spec.nummod))
         mag0_of[c] = mag_z0 if mag_z0 is not None else rows_mag[-1]
     mag = np.vstack(rows_mag)
-    mag0 = np.concatenate(
-        [np.full(n_z, mag0_of[c][mabs], dtype=np.float64) for c in range(len(recs))]
-    )
+    mag0 = np.concatenate([np.full(n_z, mag0_of[c][mabs], dtype=np.float64) for c in range(len(recs))])
     return {
         "mag": mag,
         "flux": device_ab_mag_to_flux(mag, backend="jax"),
@@ -856,7 +843,9 @@ def _maggal_gal_linear(spectra, setup: MagGalSetup, use_em: bool, xp) -> dict[st
         mag0_of[c] = leftover
     per = lambda f: np.asarray([f(r) for r in recs])  # noqa: E731
     ltir = np.stack([r[4] for r in recs])
-    meta = {k: per(lambda r, k=k: getattr(r[0], k)).astype(np.float64)[c_idx] for k in _SED_META if k != "ltir"}
+    meta = {
+        k: per(lambda r, k=k: getattr(r[0], k)).astype(np.float64)[c_idx] for k in _SED_META if k != "ltir"
+    }
     return {
         "mag": mag,
         "flux": device_ab_mag_to_flux(mag),
@@ -1034,7 +1023,6 @@ def ensure_filt_and_sedtolib(
 ) -> None:
     """Filter + sedtolib only (no MagGal). Same overrides as ``lp.prepare``."""
     import lephare as lp
-
     from lephare.prepare import _DEFAULT, overwrite_config
 
     if star_config is None:
@@ -1179,6 +1167,7 @@ def build_maglib_jax_from_lib_bin(
             )
             if integrator == "jax":
                 import jax
+
                 jax.clear_caches()
         elif kind == "gal":
             name = _split_list(config, "GAL_LIB_IN", _split_list(config, "GAL_LIB", "GAL_BIN")[0])[0]
@@ -1186,12 +1175,12 @@ def build_maglib_jax_from_lib_bin(
             with xp_ctx():
                 _append(maggal_gal_library(gal_specs, setup, integrator=integrator, xp=xp), 0)
             print(
-                f"[MagGal {integrator}] GAL n_sed={len(gal_specs)} "
-                f"{time.perf_counter() - t_kind:.2f}s",
+                f"[MagGal {integrator}] GAL n_sed={len(gal_specs)} {time.perf_counter() - t_kind:.2f}s",
                 flush=True,
             )
             if integrator == "jax":
                 import jax
+
                 jax.clear_caches()
         else:
             name = _split_list(qso_cfg, "QSO_LIB_IN", _split_list(qso_cfg, "QSO_LIB", "QSO_BIN")[0])[0]
@@ -1199,8 +1188,7 @@ def build_maglib_jax_from_lib_bin(
             with xp_ctx():
                 _append(maggal_qso_library(qso_specs, qsetup, integrator=integrator, xp=xp), 1)
             print(
-                f"[MagGal {integrator}] QSO n_sed={len(qso_specs)} "
-                f"{time.perf_counter() - t_kind:.2f}s",
+                f"[MagGal {integrator}] QSO n_sed={len(qso_specs)} {time.perf_counter() - t_kind:.2f}s",
                 flush=True,
             )
 

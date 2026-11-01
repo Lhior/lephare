@@ -141,5 +141,10 @@ ignore = [
 ]
 exclude = ["examples/*", "setup.py"]
 
+[tool.ruff.lint.per-file-ignores]
+# lephare.accel keeps the C++ variable names and branch layout (e.g. invsabSq) and matrix
+# names (L, S, W) for traceability.
+"src/lephare/accel/*" = ["N803", "N806", "SIM103", "SIM108"]
+
 [tool.coverage.run]
 omit=["src/lephare/_version.py"]

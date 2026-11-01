@@ -21,16 +21,71 @@ PI = np.pi
 # EMP_UV rest-frame air wavelengths and H-beta-normalized ratios (GalSED::generateEmEmpUV).
 LB_LINE = np.array(
     [
-        1215.67, 1335.708, 1663.48, 1908.73, 2140.896, 2325.726, 2799.116,
-        3726.04, 3728.8, 3869.063, 3888.856, 3968.771, 4026.191, 4068.601,
-        4076.349, 4101.734, 4363.21, 4340.472, 4471.48, 4712.249, 4861.352,
-        4958.911, 5006.843, 5199.079, 5754.594, 5875.62, 6300.304, 6312.064,
-        6548.041, 6562.787, 6583.461, 6678.151, 6716.44, 6730.812, 7065.19,
-        7135.803, 7319.458, 7330.196, 7751.057, 9068.611, 9530.586, 10286.731,
-        10320.491, 10336.407, 10827.334, 18750.976, 12818.072, 10938.174,
-        10049.368, 9545.969, 9229.667, 9014.909, 8862.782, 8750.473, 8665.018,
-        8598.392, 8545.383, 40511.742, 26251.517, 21655.267, 19445.581,
-        18174.237, 17362.143, 16806.509, 16407.21,
+        1215.67,
+        1335.708,
+        1663.48,
+        1908.73,
+        2140.896,
+        2325.726,
+        2799.116,
+        3726.04,
+        3728.8,
+        3869.063,
+        3888.856,
+        3968.771,
+        4026.191,
+        4068.601,
+        4076.349,
+        4101.734,
+        4363.21,
+        4340.472,
+        4471.48,
+        4712.249,
+        4861.352,
+        4958.911,
+        5006.843,
+        5199.079,
+        5754.594,
+        5875.62,
+        6300.304,
+        6312.064,
+        6548.041,
+        6562.787,
+        6583.461,
+        6678.151,
+        6716.44,
+        6730.812,
+        7065.19,
+        7135.803,
+        7319.458,
+        7330.196,
+        7751.057,
+        9068.611,
+        9530.586,
+        10286.731,
+        10320.491,
+        10336.407,
+        10827.334,
+        18750.976,
+        12818.072,
+        10938.174,
+        10049.368,
+        9545.969,
+        9229.667,
+        9014.909,
+        8862.782,
+        8750.473,
+        8665.018,
+        8598.392,
+        8545.383,
+        40511.742,
+        26251.517,
+        21655.267,
+        19445.581,
+        18174.237,
+        17362.143,
+        16806.509,
+        16407.21,
     ],
     dtype=np.float64,
 )
@@ -93,6 +148,7 @@ def apply_extinction_cpp(
     k = fast_interpolate(law.lamb, law.kval, sl, 0.0)
     return sl.copy(), sv * np.power(10.0, -0.4 * ebv * k)
 
+
 def opa_index(z: float) -> int:
     """``lround(red / 0.100000000000001)`` clamped to 80."""
     ind = int(round(float(z) / 0.100000000000001))
@@ -112,6 +168,7 @@ def opa_transmission(lamb: np.ndarray, opa: OpaTable) -> np.ndarray:
     if below.any():
         out[below] = fast_interpolate(opa.lamb, opa.trans, lam[below], 1.0)
     return out
+
 
 def apply_opa_cpp(
     sed_lamb: np.ndarray,
@@ -199,7 +256,6 @@ def integrate_sed_cpp(
     return r3, r5 * C_LIGHT_A_S
 
 
-
 def compute_magnitudes_cpp(
     sed_lamb: np.ndarray,
     sed_flux: np.ndarray,
@@ -262,9 +318,7 @@ def generate_em_emp_sfr(sfr: float, luv: float, lopt: float) -> tuple[np.ndarray
     """``GalSED::generateEmEmpSFR`` Kennicutt H-alpha scaling."""
     nuvr = -2.5 * (luv - lopt)
     if nuvr < 4 and sfr > 0:
-        scale = 10.0 ** (
-            np.log10(sfr) + 41.27 - np.log10(4 * PI * 100 * (3.08568**2)) - 36
-        )
+        scale = 10.0 ** (np.log10(sfr) + 41.27 - np.log10(4 * PI * 100 * (3.08568**2)) - 36)
     else:
         scale = 0.0
     scale = scale / 2.85
@@ -291,6 +345,7 @@ def apply_ext_lines(
     lya = (sl > 1215.0) & (sl < 1216.0)
     out = np.where(lya, out * (0.445 * np.power(10.0, -0.4 * ebv / f * 13.8)), out)
     return sl.copy(), out
+
 
 def rescale_em_lines(line_val: np.ndarray, frac_em: float) -> np.ndarray:
     return np.asarray(line_val, dtype=np.float64) * float(frac_em)

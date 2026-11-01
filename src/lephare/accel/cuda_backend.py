@@ -71,9 +71,7 @@ def _require_cupy():
     try:
         import cupy as cp
     except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "backend requires CuPy. Install with: pip install 'lephare[cuda]'"
-        ) from exc
+        raise ImportError("backend requires CuPy. Install with: pip install 'lephare[cuda]'") from exc
     return cp
 
 
@@ -90,7 +88,9 @@ def _device_flux(cp, flux: np.ndarray, dtype):
     from .maglib import cached_by_identity
 
     return cached_by_identity(
-        _FLUX_CACHE, flux, (np.dtype(dtype).str,),
+        _FLUX_CACHE,
+        flux,
+        (np.dtype(dtype).str,),
         lambda: cp.asarray(np.ascontiguousarray(flux.astype(dtype))),
     )
 
@@ -361,9 +361,7 @@ def pdf_batch_cuda(chi2: np.ndarray, tensors: MagLibTensors) -> np.ndarray:
     d_chi2 = cp.asarray(np.asarray(chi2, dtype=np.float64))
     if d_chi2.ndim == 1:
         d_chi2 = d_chi2[None, :]
-    d_pdf = _bay_zg_pdf_device(
-        cp, d_chi2, index, d_aux["gal_idx"], d_aux["bin_cols"], d_aux["dz"]
-    )
+    d_pdf = _bay_zg_pdf_device(cp, d_chi2, index, d_aux["gal_idx"], d_aux["bin_cols"], d_aux["dz"])
     return cp.asnumpy(d_pdf)
 
 
@@ -584,9 +582,7 @@ def _process_batch_cuda_core(
 
         for i in ul_idx:
             i = int(i)
-            chi2, _, _, bus = rm_discrepant(
-                ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors
-            )
+            chi2, _, _, bus = rm_discrepant(ab[i], sab[i], busnorma[i], busul[i], int(nbul[i]), tensors)
             merge_ancil(ancil, bestfit_ancil_from_chi2(chi2, tensors, busnorma=bus), np.asarray([i]))
             pdfs[i] = bay_zg_pdf(chi2, tensors)
             zm, zmn = pdf_zmode_zmean(pdfs[i : i + 1], tensors.gridz)
@@ -635,9 +631,7 @@ def _process_batch_cuda_core(
             pdfs[easy_i_np] = cp.asnumpy(d_pdf)
             zmode[easy_i_np] = cp.asnumpy(d_zm)
             zmean[easy_i_np] = cp.asnumpy(d_zmn)
-            indmin, chimin, min_zg, min_zq = _fit_winners_device(
-                cp, d_chi2[easy_j_np], index, d_aux
-            )
+            indmin, chimin, min_zg, min_zq = _fit_winners_device(cp, d_chi2[easy_j_np], index, d_aux)
             merge_ancil(
                 ancil,
                 bestfit_ancil_from_type_mins(
@@ -654,7 +648,7 @@ def _process_batch_cuda_core(
         if hard:
             hard_j = np.asarray([j for j, _ in hard], dtype=np.int64)
             chi2_hard = cp.asnumpy(d_chi2[hard_j])
-            for row, (j, i) in enumerate(hard):
+            for row, (_j, i) in enumerate(hard):
                 chi2 = chi2_hard[row]
                 improved_i = _type_mins(chi2, types)
                 bus = busnorma[i].copy()
@@ -694,9 +688,7 @@ def _process_batch_cuda_core(
                         nb_removed += 1
                     else:
                         break
-                merge_ancil(
-                    ancil, bestfit_ancil_from_chi2(chi2, tensors, busnorma=bus), np.asarray([i])
-                )
+                merge_ancil(ancil, bestfit_ancil_from_chi2(chi2, tensors, busnorma=bus), np.asarray([i]))
                 pdfs[i] = bay_zg_pdf(chi2, tensors)
                 zm, zmn = pdf_zmode_zmean(pdfs[i : i + 1], tensors.gridz)
                 zmode[i] = zm[0]

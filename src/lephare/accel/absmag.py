@@ -10,7 +10,8 @@ to ``Z_BEST`` and ``absmag`` combines them with the observed photometry.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 
@@ -205,7 +206,10 @@ def absolute_magnitudes(
     tensors: MagLibTensors,
     config: Mapping[str, Any],
 ) -> dict[str, np.ndarray]:
-    """``interp_lib`` + ``absmag`` → ``MAG_ABS()``, ``EMAG_ABS()``, ``K_COR()``, ``MABS_FILT()``, ``MAG_MOD()``."""
+    """``interp_lib`` + ``absmag``.
+
+    Returns ``MAG_ABS()``, ``EMAG_ABS()``, ``K_COR()``, ``MABS_FILT()`` and ``MAG_MOD()``.
+    """
     best, maxkcol = library_filters(tensors, config)
     magm, magm0, kap = interp_lib(valid, consiz, dmmin, indmin_gal, tensors)
 
