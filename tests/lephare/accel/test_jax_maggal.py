@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -237,3 +238,31 @@ def test_iter_sed_bin_reads_every_gal_record(lsst_env, tmp_path):
     assert len(specs) == phys.shape[0] > 1
     assert np.allclose([sp.age for sp in specs], phys[:, 0], rtol=1e-5)
     assert np.allclose([sp.luv for sp in specs], phys[:, 1], rtol=1e-5, atol=1e-4)
+
+
+def test_jax_maggal_emlines_star_forming_sed(lsst_env, tmp_path):
+    """EMP_UV lines on a star-forming GAL record (the first COSMOS SED gets none) match C++."""
+    cfg = _cfg(lsst_env)
+    cfg.update(
+        EM_LINES="EMP_UV", EM_DISPERSION="1.", EB_V="0.", EXTINC_LAW="SMC_prevot.dat", MOD_EXTINC="0,0"
+    )
+    cfg["Z_STEP"] = "0.5,0.,2."
+    _prep_libbin(cfg, tmp_path)
+    _, path = _first_galsed(cfg)
+    specs = list(iter_sed_bin(path, kind="gal"))
+    # Last record with NUV-R < 4, i.e. one that receives empirical UV emission lines
+    k = max(i for i, s in enumerate(specs) if -2.5 * (s.luv - s.lopt) < 4)
+    # Copy that record into its own lib_bin file so C++ readSEDBin can load it
+    offsets = np.cumsum([0] + [4 + 8 + 16 * s.lamb.size + 88 for s in specs])
+    one = tmp_path / "one_gal.bin"
+    one.write_bytes(Path(path).read_bytes()[offsets[k] : offsets[k + 1]])
+    sed = lp.GalSED("one")
+    sed.readSEDBin(str(one))
+    cpp_mag = _cpp_mags(_galmag(cfg).make_maglib(sed), sum_lines=True)
+    no_lines = _cpp_mags(_galmag(dict(cfg, EM_LINES="NO")).make_maglib(sed), sum_lines=False)
+    assert np.max(np.abs(cpp_mag - no_lines)) > 1e-3  # the lines matter for this SED
+    setup = maggal_setup_from_config(cfg)
+    for integrator in ("cpp", "jax"):
+        out = maggal_one_gal(specs[k], setup, integrator=integrator, em_lines=True)
+        # line-dominated faint bands (~29.5 mag) differ by summation round-off only
+        assert np.allclose(out["mag"], cpp_mag, rtol=0, atol=1e-6), integrator

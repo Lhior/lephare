@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import _lephare
 from .mag_conv import C_LIGHT_A_S, FilterCurve, ab_mag_to_flux
 
 HIGH_MAG = 1000.0
@@ -18,83 +19,10 @@ INVALID_MAG = -9999.0
 LYA_SPLIT = 1215.67
 PI = np.pi
 
-# EMP_UV rest-frame air wavelengths and H-beta-normalized ratios (GalSED::generateEmEmpUV).
-LB_LINE = np.array(
-    [
-        1215.67,
-        1335.708,
-        1663.48,
-        1908.73,
-        2140.896,
-        2325.726,
-        2799.116,
-        3726.04,
-        3728.8,
-        3869.063,
-        3888.856,
-        3968.771,
-        4026.191,
-        4068.601,
-        4076.349,
-        4101.734,
-        4363.21,
-        4340.472,
-        4471.48,
-        4712.249,
-        4861.352,
-        4958.911,
-        5006.843,
-        5199.079,
-        5754.594,
-        5875.62,
-        6300.304,
-        6312.064,
-        6548.041,
-        6562.787,
-        6583.461,
-        6678.151,
-        6716.44,
-        6730.812,
-        7065.19,
-        7135.803,
-        7319.458,
-        7330.196,
-        7751.057,
-        9068.611,
-        9530.586,
-        10286.731,
-        10320.491,
-        10336.407,
-        10827.334,
-        18750.976,
-        12818.072,
-        10938.174,
-        10049.368,
-        9545.969,
-        9229.667,
-        9014.909,
-        8862.782,
-        8750.473,
-        8665.018,
-        8598.392,
-        8545.383,
-        40511.742,
-        26251.517,
-        21655.267,
-        19445.581,
-        18174.237,
-        17362.143,
-        16806.509,
-        16407.21,
-    ],
-    dtype=np.float64,
-)
-# ``empirical_ratio`` in ``lephare/src/lib/emission_lines.h`` (v1.0.0): H-beta-normalized
-# ratios used by BOTH ``GalSED::generateEmEmpUV`` and ``generateEmEmpSFR``
-# (Lya 22.2, [OII] 1.425+1.425, [OIII] 0.38+1.14, H-alpha 2.85, [NII]6583 0.86).
-# The older Ilbert+09 ``empirical_ratio_ori`` (0.81/0.21/0.59/2.90) is not used by MagGal.
-EMPIRICAL_RATIO = np.zeros(65, dtype=np.float64)
-EMPIRICAL_RATIO[[0, 7, 8, 20, 21, 22, 29, 30]] = [22.2, 1.425, 1.425, 1.0, 0.38, 1.14, 2.85, 0.86]
+# EMP_UV rest-frame air wavelengths and H-beta-normalized ratios used by GalSED::generateEmEmpUV
+# and generateEmEmpSFR, taken from the compiled library so they follow emission_lines.h.
+LB_LINE = np.asarray(_lephare._emission_lines, dtype=np.float64)
+EMPIRICAL_RATIO = np.asarray(_lephare._empirical_ratio, dtype=np.float64)
 Z0_LINE_EMP_UV = EMPIRICAL_RATIO
 Z0_LINE_EMP_SFR = EMPIRICAL_RATIO
 
