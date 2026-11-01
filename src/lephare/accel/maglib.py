@@ -175,7 +175,8 @@ def export_maglib_from_photoz(photz, config: dict[str, Any] | None = None) -> Ma
     if len(cosmo_vals) < 3:
         cosmo_vals = [70.0, 0.3, 0.7]
     lcdm = lp.cosmo(cosmo_vals[0], cosmo_vals[1], cosmo_vals[2])
-    funz0 = float(lcdm.distMod(gridz[1] / 20.0)) if len(gridz) > 1 else 0.0
+    # z=0 distance-modulus shift of the absolute-magnitude prior (C++ folds it into SED::mag0)
+    funz0 = float(lcdm.distMod((gridz[1] if len(gridz) > 1 else 0.01) / 20.0))
     # PhotoZ::read_lib -> GalSED::kcorrec: mag(z) - mag(z=0) - distMod(z)
     kcorr = mag - mag[index_z0] - np.asarray(lcdm.distMod(red), dtype=np.float64)[:, None]
     mass, sfr = _gal_mass_sfr_from_lib_bin(config, types, nummod, age)
