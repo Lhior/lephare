@@ -83,7 +83,8 @@ def prepare_photometry(
     tensors :
         Template library; supplies error scaling and the global/forbidden contexts.
     offsets :
-        Magnitude offsets applied as in ``adapt_mag`` (model convention).
+        Magnitude offsets applied as in ``adapt_mag`` (model convention): fluxes and
+        flux errors are both scaled, as in LePHARE >= 1.1.
 
     Returns
     -------
@@ -115,6 +116,7 @@ def prepare_photometry(
             corr = offsets[k]
             use = (ab[:, k] > 0) | (sab[:, k] > 0)
             ab[use, k] = ab[use, k] * (10.0 ** (0.4 * corr))
+            sab[use, k] = sab[use, k] * (10.0 ** (0.4 * corr))
 
     if context is None:
         context = np.zeros(n_obj, dtype=np.int64)

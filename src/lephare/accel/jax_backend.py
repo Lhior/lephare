@@ -95,6 +95,7 @@ def _prepare_photometry_arrays(
         corr = jnp.power(10.0, 0.4 * offsets)
         use = (ab > 0) | (sab > 0)
         ab = jnp.where(use, ab * corr[None, :], ab)
+        sab = jnp.where(use, sab * corr[None, :], sab)
 
     if context is None:
         context = jnp.zeros(mags.shape[0], dtype=jnp.int64)

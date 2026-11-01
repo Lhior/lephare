@@ -82,13 +82,14 @@ def select_adapt_sources(
     return (zs > zmin) & (zs < zmax) & (mag_sel > tmin) & (mag_sel < tmax)
 
 
-def adapt_mag(ab_ori: np.ndarray, sab: np.ndarray, a0: np.ndarray) -> np.ndarray:
-    """C++ ``onesource::adapt_mag``: ``ab = ab_ori * 10**(0.4 a0)``."""
+def adapt_mag(ab_ori: np.ndarray, sab_ori: np.ndarray, a0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """C++ ``onesource::adapt_mag``: flux and flux error both scaled by ``10**(0.4 a0)``."""
     a0 = np.asarray(a0, dtype=np.float64)
-    scale = np.power(10.0, 0.4 * a0)
+    scale = np.power(10.0, 0.4 * a0)[None, :]
     ab_ori = np.asarray(ab_ori, dtype=np.float64)
-    use = (ab_ori > 0) | (sab > 0)
-    return np.where(use, ab_ori * scale[None, :], ab_ori.copy())
+    sab_ori = np.asarray(sab_ori, dtype=np.float64)
+    use = (ab_ori > 0) | (sab_ori > 0)
+    return np.where(use, ab_ori * scale, ab_ori), np.where(use, sab_ori * scale, sab_ori)
 
 
 def _is_same_model(tensors: MagLibTensors, i: int, j: int) -> bool:
@@ -364,7 +365,7 @@ def calculate_offsets(
     zs_s = np.asarray(zs, dtype=np.float64)[mask]
     ctx = None if context is None else np.asarray(context)[mask]
 
-    ab_ori, sab, busnorma, busul, nbul = prepare_photometry(mags_s, magerrs_s, ctx, tensors, offsets=None)
+    ab_ori, sab_ori, busnorma, busul, nbul = prepare_photometry(mags_s, magerrs_s, ctx, tensors, offsets=None)
     mab_ori = flux2mag(ab_ori)
     csr_off, csr_idx = build_zslice_csr(tensors)
 
@@ -377,7 +378,7 @@ def calculate_offsets(
     converge = False
     iteration = 0
     while (not converge) and iteration < 10:
-        ab = adapt_mag(ab_ori, sab, a0)
+        ab, sab = adapt_mag(ab_ori, sab_ori, a0)
         indmin, dm_gal = fit(ab, sab, busnorma, busul, nbul, zs_s)
         magm = interp_lib_magm(tensors, indmin[:, 0], dm_gal, zs_s)
         a0pre = a0.copy()

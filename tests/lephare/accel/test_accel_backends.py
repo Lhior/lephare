@@ -86,6 +86,39 @@ def test_jax_hybrid_matches_cpp(lsst_env, lsst_library):
 @pytest.mark.parametrize(
     "backend",
     [
+        "numpy",
+        pytest.param("jax_hybrid", marks=DEVICE_KINDS[0].marks),
+        pytest.param("cuda_hybrid", marks=DEVICE_KINDS[1].marks),
+    ],
+)
+def test_offsets_match_cpp(lsst_env, lsst_library, backend):
+    """Zero-point offsets scale fluxes and flux errors exactly as C++ APPLY_SYSSHIFT."""
+    from lephare.accel.dispatch import process_with_backend
+
+    offsets = np.array([0.08, -0.05, 0.03, -0.02, 0.06, -0.07])
+    cfg = dict(lsst_env)
+    cfg["APPLY_SYSSHIFT"] = ",".join(str(o) for o in offsets)
+    mags, magerrs, _ = read_catalog("test")
+    mags, magerrs = mags[:64], magerrs[:64]
+    pdf_cpp, _, out_cpp = _cpp_pdfs(cfg, mags, magerrs)
+    if backend == "numpy":
+        pdfs, _ = process_batch(mags, magerrs, lsst_library, offsets=offsets)
+        assert np.allclose(pdfs, pdf_cpp, rtol=1e-8, atol=1e-10)
+        return
+    result = process_with_backend(backend, mags, magerrs, lsst_library, offsets=offsets, dtype=np.float64)
+    pdfs = result[0]
+    ancil = result[4] if len(result) == 5 else {}  # object-batched CUDA returns no best-fit columns
+    norm = lambda p: p / p.sum(axis=1, keepdims=True)  # noqa: E731
+    assert np.max(np.abs(norm(pdfs) - norm(pdf_cpp))) < 1e-6
+    for key in set(ancil) & {"Z_BEST", "ZQ_BEST"}:
+        assert np.allclose(
+            ancil[key], np.asarray(out_cpp[key], dtype=np.float64), atol=1e-4, equal_nan=True
+        ), key
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
         pytest.param("jax_hybrid", marks=DEVICE_KINDS[0].marks),
         pytest.param("cuda_hybrid", marks=DEVICE_KINDS[1].marks),
     ],
@@ -261,6 +294,27 @@ def test_jax_template_tiles_match_numpy(lsst_library, monkeypatch):
     ancil_n = bestfit_ancil_from_chi2(np.stack(chi2s), tensors)
     for key in ancil_n:
         assert np.allclose(ancil_j[key], ancil_n[key], rtol=1e-9, atol=1e-9, equal_nan=True), key
+
+
+def test_numpy_autoadapt_vs_cpp(lsst_env, lsst_library):
+    """NumPy AUTO_ADAPT a0 matches C++ ``calculate_offsets_from_input``."""
+    from lephare.accel.autoadapt import calculate_offsets
+
+    mags, magerrs, zs = read_catalog("train")
+    cfg_ad = dict(lsst_env)
+    cfg_ad["AUTO_ADAPT"] = "YES"
+    cfg_ad["ADAPT_LIM"] = "10,28"
+    cfg_ad["ADAPT_ZBIN"] = "0.001,6"
+    inp = lephare_input(mags, magerrs, zs)
+    a0_cpp = np.asarray(lp.calculate_offsets_from_input(cfg_ad, inp), dtype=np.float64)
+    a0_np = calculate_offsets(mags, magerrs, zs, lsst_library, cfg_ad, verbose=False)
+    assert a0_cpp.shape == a0_np.shape
+    assert np.allclose(a0_np, a0_cpp, rtol=1e-10, atol=1e-10), f"numpy={a0_np} cpp={a0_cpp}"
+    if cuda_available():
+        from lephare.accel.cuda_autoadapt import calculate_offsets_cuda
+
+        a0_cu = calculate_offsets_cuda(mags, magerrs, zs, lsst_library, cfg_ad, verbose=False)
+        assert np.allclose(a0_cu, a0_np, rtol=1e-10, atol=1e-10), f"cuda={a0_cu} numpy={a0_np}"
 
 
 def test_pdf_zmode_zmean_vectorized():

@@ -414,6 +414,7 @@ def prepare_photometry_cuda_device(
         corr = cp.power(10.0, 0.4 * cp.asarray(offsets, dtype=dtype))
         use = (ab > 0) | (sab > 0)
         ab = cp.where(use, ab * corr[None, :], ab)
+        sab = cp.where(use, sab * corr[None, :], sab)
 
     if context is None:
         ctx = cp.zeros(n_obj, dtype=cp.int64)
