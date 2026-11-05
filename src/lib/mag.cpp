@@ -428,11 +428,6 @@ void GalMag::read_SED() {
     vector<GalSED> seds = make_maglib(oneSED);
     // write the result in file
     write_mag(seds);
-    if (verbose)
-      cout << endl
-           << " Done maglib SED " << oneSED.name << " nummod " << oneSED.nummod
-           << endl
-           << flush;
 
     // Stop the code if only 2% of the memory left
 #ifdef _linux
@@ -765,11 +760,6 @@ void QSOMag::read_SED() {
     vector<QSOSED> seds = make_maglib(oneSED);
     // write the result in file
     write_mag(seds);
-    if (verbose)
-      cout << endl
-           << " Done maglib SED " << oneSED.name << " nummod " << oneSED.nummod
-           << endl
-           << flush;
 
     // Stop the code if only 2% of the memory left
 #ifdef _linux
