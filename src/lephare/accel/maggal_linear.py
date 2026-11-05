@@ -194,11 +194,6 @@ def grids_weights(grids: Sequence[np.ndarray], setup, gridz=None, igm: bool = Tr
     return out
 
 
-def grid_weights(rest_lamb, setup):
-    """``W[z, b, j]``, ``r1[z, b]``, ``invalid[z, b]`` (NumPy) for one rest-frame grid."""
-    return grids_weights([rest_lamb], setup)[0]
-
-
 def _matmul(xp, S, W):
     """``S @ W`` on ``xp``'s device, returned on the host."""
     return _to_host(xp, xp.asarray(S) @ xp.asarray(W))

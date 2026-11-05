@@ -202,23 +202,6 @@ def compute_magnitudes_cpp(
     return mags
 
 
-def compute_fluxes_cpp(
-    sed_lamb: np.ndarray,
-    sed_flux: np.ndarray,
-    filters: list[FilterCurve],
-) -> np.ndarray:
-    """``SED::compute_fluxes``: ``fmel/arean`` (no fcorr, no distMod)."""
-    out = np.zeros(len(filters), dtype=np.float64)
-    for i, flt in enumerate(filters):
-        integ = integrate_sed_cpp(sed_lamb, sed_flux, flt)
-        if integ is None:
-            out[i] = -9999.0
-            continue
-        fmel, arean = integ
-        out[i] = 0.0 if arean == 0 else fmel / arean
-    return out
-
-
 def mag_plus_lines(mags: np.ndarray, fl_em: np.ndarray) -> np.ndarray:
     """``GalSED::sumEmLines``."""
     flux = ab_mag_to_flux(mags) + np.asarray(fl_em, dtype=np.float64)

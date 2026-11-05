@@ -53,11 +53,6 @@ def ab_mag_to_flux(mags: np.ndarray) -> np.ndarray:
     return out
 
 
-def flux_to_ab_mag(flux: np.ndarray) -> np.ndarray:
-    flux = np.asarray(flux, dtype=np.float64)
-    return -2.5 * np.log10(np.clip(flux, 1e-300, None)) - 48.6
-
-
 def integrate_sed(
     sed_lamb: np.ndarray,
     sed_flux: np.ndarray,
@@ -239,23 +234,6 @@ def iter_sed_bin(path: str | Path, kind: str = "star") -> Iterable[SedSpectrum]:
             sfr=float(phys[5]),
             zmet=float(phys[6]),
         )
-
-
-def load_extinction_law(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
-    """Load a LePHARE ``ext/*.dat`` law as ``(lambda, k_lambda)``."""
-    path = Path(path)
-    rows = []
-    with path.open() as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.replace(",", " ").split()
-            if len(parts) < 2:
-                continue
-            rows.append((float(parts[0]), float(parts[1])))
-    arr = np.asarray(rows, dtype=np.float64)
-    return arr[:, 0], arr[:, 1]
 
 
 def device_ab_mag_to_flux(mags, backend: str = "numpy", dtype=np.float64):

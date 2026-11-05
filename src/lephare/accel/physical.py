@@ -734,7 +734,7 @@ def _phys_props_cuda(keys, mags, magerrs, context, offsets, busnorma, chimin_gal
 
 # ------------------------------------------- generatePDF fused into the CUDA fit
 
-_FUSED_PHYS = contextvars.ContextVar("rail_lephare_fused_phys", default=None)
+_FUSED_PHYS = contextvars.ContextVar("lephare_accel_fused_phys", default=None)
 _FUSED_KERNELS: dict = {}
 _FUSED_TABLES: dict = {}
 
@@ -987,7 +987,7 @@ def fused_pass2_phys(
     real = "double" if dtype == np.float64 else "float"
     acc_dtype = np.float64 if dtype == np.float64 else np.float32
     nbytes = np.dtype(dtype).itemsize
-    # Defaults from an A100 sweep (benchmarks/diffsky/kbench.py, BC03 diffsky, 20k objects):
+    # Defaults from an A100 sweep (BC03 library, 20k objects):
     # one shared histogram + one p(z) copy and 8 blocks/SM beat per-warp copies (FP32
     # 433 -> 278 ms, FP64 1150 -> 727 ms with 2 templates per thread).
     env = os.environ.get
@@ -1165,8 +1165,8 @@ def check_supported(tensors: MagLibTensors, config: Mapping[str, Any]) -> None:
     if not tensors.has_phys():
         raise ValueError(
             "Galaxy properties need per-template SED metadata (mass, sfr, luminosities, "
-            "k-corrections) in the maglib; re-run the accelerated inform stage with this "
-            "version of rail_lephare to rebuild maglib_tensors.npz."
+            "k-corrections) in the maglib; re-export it with this version of lephare.accel "
+            "(export_maglib_from_photoz or the jax_maggal builder)."
         )
     if split_keyword(config, "Z_METHOD", "BEST", 1)[0][:1].upper() == "M":
         raise NotImplementedError("Galaxy properties with Z_METHOD=MED are not supported on accel backends")

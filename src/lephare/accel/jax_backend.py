@@ -36,7 +36,6 @@ def _require_jax():
         import jax.numpy as jnp
     except ImportError as exc:  # pragma: no cover
         raise ImportError("backend requires JAX. Install with: pip install 'lephare[jax]'") from exc
-    os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
     flag = os.environ.get("JAX_ENABLE_X64", "1").strip().lower()
     jax.config.update("jax_enable_x64", flag not in ("0", "false", "no"))
     return jax, jnp

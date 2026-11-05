@@ -157,30 +157,6 @@ def _fit_winners_device(cp, d_chi2, index: BayZgIndex, d_aux: dict):
     return cp.asnumpy(indmin), cp.asnumpy(chimin), mins[0], mins[1]
 
 
-def _apply_mabs_priors(
-    chi2: np.ndarray,
-    dm: np.ndarray,
-    types: np.ndarray,
-    mag0: np.ndarray,
-    z_lib: np.ndarray,
-    prior: np.ndarray,
-    funz0: float,
-) -> np.ndarray:
-    """Apply Mabs priors; ``chi2``/``dm`` may be ``[N_t]`` or ``[N_obj, N_t]``."""
-    chi2 = chi2.copy()
-    if prior[0] < 0 and prior[1] < 0:
-        abs_mag = mag0 - 2.5 * np.log10(np.clip(dm, 1e-300, None))
-        abs_mag = np.where(z_lib < 1e-10, abs_mag - funz0, abs_mag)
-        reject = (types == 0) & ((abs_mag <= prior[0]) | (abs_mag >= prior[1]))
-        chi2 = np.where(reject, HIGH_CHI2, chi2)
-    if prior[2] < 0 and prior[3] < 0:
-        abs_mag = mag0 - 2.5 * np.log10(np.clip(dm, 1e-300, None))
-        abs_mag = np.where(z_lib < 1e-10, abs_mag - funz0, abs_mag)
-        reject = (types == 1) & ((abs_mag <= prior[2]) | (abs_mag >= prior[3]))
-        chi2 = np.where(reject, HIGH_CHI2, chi2)
-    return chi2
-
-
 def _apply_mabs_priors_device(cp, d_chi2, d_dm, d_types, d_mag0, d_z, prior, funz0):
     """In-place Mabs priors on device arrays."""
     prior = np.asarray(prior, dtype=np.float64)

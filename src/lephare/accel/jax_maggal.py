@@ -33,7 +33,6 @@ from .mag_physics import (
     apply_ext_lines,
     apply_extinction_cpp,
     apply_opa_cpp,
-    compute_fluxes_cpp,
     compute_magnitudes_cpp,
     generate_em_emp_sfr,
     generate_em_emp_uv,
@@ -418,93 +417,6 @@ def _add_em_lines_gpu(mags_cz: np.ndarray, recs, age_ok: np.ndarray, setup: MagG
     out = mag_plus_lines(mags_cz.reshape(-1, n_b), fnu.reshape(-1, n_b)).reshape(mags_cz.shape)
     out[~age_ok] = HIGH_MAG
     return out
-
-
-def jax_compute_magnitudes_batch(
-    lambs: Sequence[np.ndarray],
-    fluxes: Sequence[np.ndarray],
-    dist_mods: np.ndarray,
-    filters: list[FilterCurve],
-    dtype=np.float64,
-) -> np.ndarray:
-    """GPU batch of already-redshifted spectra (union-grid ``integrateSED``)."""
-    import jax
-    import jax.numpy as jnp
-
-    jax.config.update("jax_enable_x64", True)
-    pad_l, pad_f = _pad_spectra(lambs, fluxes)
-    fl, ft, lmin, lmax, fcorr = _filter_pack(filters, dtype)
-    jl = jnp.asarray(pad_l, dtype=dtype)
-    jf = jnp.asarray(pad_f, dtype=dtype)
-    dms = jnp.asarray(dist_mods, dtype=dtype)
-
-    def mag_one_filter(sed_l, sed_f, dm, fl_i, ft_i, lmin_i, lmax_i, fcorr_i):
-        invalid = (sed_l[0] >= lmin_i) | (sed_l[-1] <= lmax_i)
-        grid = jnp.sort(jnp.concatenate([sed_l, fl_i]))
-        sed_i = jnp.interp(grid, sed_l, sed_f, left=0.0, right=0.0)
-        tr_i = jnp.interp(grid, fl_i, ft_i, left=0.0, right=0.0)
-        tr_i = jnp.where((grid >= lmin_i) & (grid <= lmax_i), tr_i, 0.0)
-        dl = grid[1:] - grid[:-1]
-        lmean = 0.5 * (grid[1:] + grid[:-1])
-        tmean = 0.5 * (tr_i[1:] + tr_i[:-1])
-        fmean = 0.5 * (sed_i[1:] + sed_i[:-1])
-        conv = C_LIGHT_A_S / (lmean * lmean)
-        arean = jnp.sum(tmean * conv * dl)
-        fmel = jnp.sum(fmean * tmean * dl)
-        mag = -2.5 * jnp.log10(fmel / arean * fcorr_i) - 48.6 + dm
-        mag = jnp.where((fmel > 0) & (arean > 0), mag, jnp.asarray(HIGH_MAG, dtype=dtype))
-        return jnp.where(invalid, jnp.asarray(INVALID_MAG, dtype=dtype), mag)
-
-    def one_sed(sed_l, sed_f, dm):
-        return jax.vmap(mag_one_filter, in_axes=(None, None, None, 0, 0, 0, 0, 0))(
-            sed_l, sed_f, dm, fl, ft, lmin, lmax, fcorr
-        )
-
-    out = jax.jit(jax.vmap(one_sed))(jl, jf, dms)
-    return np.asarray(jax.device_get(out), dtype=np.float64)
-
-
-def _continuum_at_z(
-    lamb: np.ndarray,
-    flux: np.ndarray,
-    z: float,
-    dist_mod: float,
-    setup: MagGalSetup,
-    integrator: str,
-) -> np.ndarray:
-    lamb, flux = warning_integrate_sed(lamb, flux, z, setup.filters)
-    lamb, flux = apply_opa_cpp(lamb, flux, z, setup.opa_all)
-    lamb, flux = redshift_spectrum(lamb, flux, z)
-    if integrator == "jax":
-        return jax_compute_magnitudes_batch([lamb], [flux], np.array([dist_mod]), setup.filters)[0]
-    return compute_magnitudes_cpp(lamb, flux, setup.filters, dist_mod=dist_mod)
-
-
-def _em_line_fluxes(
-    spec: SedSpectrum,
-    z: float,
-    dist_mod: float,
-    ebv: float,
-    frac_em: float,
-    setup: MagGalSetup,
-) -> np.ndarray:
-    em = setup.emlines
-    n_b = len(setup.filters)
-    if em[:2].upper() == "NO" or em[:1] not in ("E", "P", "e", "p"):
-        return np.zeros(n_b, dtype=np.float64)
-    if em.startswith("EMP_SFR"):
-        ll, lv = generate_em_emp_sfr(spec.sfr, spec.luv, spec.lopt)
-    else:
-        ll, lv = generate_em_emp_uv(spec.luv, spec.lopt)
-    ll, lv = apply_ext_lines(ll, lv, ebv, setup.mw_ext)
-    lv = rescale_em_lines(lv, frac_em)
-    el, ev = generate_em_spectra(ll, lv, nstep=40)
-    if el.size == 0:
-        return np.zeros(n_b, dtype=np.float64)
-    el, ev = apply_opa_cpp(el, ev, z, setup.opa_all)
-    el, ev = redshift_spectrum(el, ev, z)
-    ev = ev * (10.0 ** (-0.4 * dist_mod))
-    return compute_fluxes_cpp(el, ev, setup.filters)
 
 
 def maggal_one_gal(
