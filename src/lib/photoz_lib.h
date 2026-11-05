@@ -298,8 +298,8 @@ class PhotoZ {
     \param flux row-major [N_t * N_b]
     \param z, types, mag0, nummod, age, ebv length N_t
   */
-  void export_maglib(int mabs_ref, double *flux, double *z, int *types,
-                     double *mag0, int *nummod, double *age, double *ebv) const;
+  void export_maglib(int mabs_ref, double* flux, double* z, int* types,
+                     double* mag0, int* nummod, double* age, double* ebv) const;
 
   //! Return the indexes over zlib vector on which to run the fit
   /*!

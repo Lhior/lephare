@@ -521,12 +521,11 @@ PYBIND11_MODULE(_lephare, mod) {
            "Write the per-source outputs (catalogue, spectra, PDFs).")
       .def("validLib", &PhotoZ::validLib,
            "Indices of the library templates compatible with a redshift.")
-      .def(
-          "compute_offsets", &PhotoZ::compute_offsets,
-          "Determine the per-band zero-point offsets to apply before fitting.")
+      .def("compute_offsets", &PhotoZ::compute_offsets,
+           "Determine the per-band zero-point offsets to apply before fitting.")
       .def(
           "export_maglib",
-          [](PhotoZ &self, int mabs_ref) {
+          [](PhotoZ& self, int mabs_ref) {
             const size_t n_t = self.fullLib.size();
             const ssize_t n_b = self.imagm;
             py::array_t<double> flux({static_cast<ssize_t>(n_t), n_b});
@@ -551,7 +550,8 @@ PYBIND11_MODULE(_lephare, mod) {
             return out;
           },
           py::arg("mabs_ref") = 0,
-          "Dense template-library tensors (flux, z, type, mag0, model, age, E(B-V)) for lephare.accel.");
+          "Dense template-library tensors (flux, z, type, mag0, model, age, "
+          "E(B-V)) for lephare.accel.");
   // mod.def("read_lib", [](const string& libName, int ind, vector<int>
   // emMod, int babs) { 			vector<SED*> libFull; int
   // nummodpre[3]; 			string filtname; vector<double>

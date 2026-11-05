@@ -648,9 +648,9 @@ PhotoZ::PhotoZ(keymap& key_analysed) {
   }
 }
 
-void PhotoZ::export_maglib(int mabs_ref, double *flux_out, double *z,
-                           int *types, double *mag0, int *nummod, double *age,
-                           double *ebv) const {
+void PhotoZ::export_maglib(int mabs_ref, double* flux_out, double* z,
+                           int* types, double* mag0, int* nummod, double* age,
+                           double* ebv) const {
   const size_t n_t = fullLib.size();
   const int n_b = imagm;
   if (n_t == 0 || n_b <= 0) return;
@@ -661,7 +661,7 @@ void PhotoZ::export_maglib(int mabs_ref, double *flux_out, double *z,
 #pragma omp parallel for schedule(static)
 #endif
   for (size_t i = 0; i < n_t; ++i) {
-    SED *sed = fullLib[i];
+    SED* sed = fullLib[i];
     int typ = 2;
     if (sed->nlib == GAL)
       typ = 0;
@@ -675,8 +675,8 @@ void PhotoZ::export_maglib(int mabs_ref, double *flux_out, double *z,
     age[i] = sed->age;
     ebv[i] = sed->ebv;
     z[i] = zLib[i];
-    const vector<double> &fi = flux[i];
-    double *row = flux_out + i * static_cast<size_t>(n_b);
+    const vector<double>& fi = flux[i];
+    double* row = flux_out + i * static_cast<size_t>(n_b);
     for (int k = 0; k < n_b; ++k) row[k] = fi[k];
   }
 }
